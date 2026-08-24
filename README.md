@@ -2,6 +2,28 @@
 
 GGML/C++ implementation of NVIDIA's Kimodo text-to-motion model.
 
+This repository also contains the customized editor published at
+[models.xedoc.ru](https://models.xedoc.ru): 26 embedded preview characters,
+SMPL-X retargeting, camera follow, animated floor alignment, and a manual
+height adjustment.
+
+## Public deployment
+
+The public domain terminates HTTPS on Nginx at `82.146.42.213`. The server is
+a small CPU-only VM, so it proxies the editor and generation API through an
+SSH reverse tunnel to the Windows/Vulkan workstation running the native
+Kimodo backend on `127.0.0.1:8094`.
+
+- Server configuration: `.deploy/nginx.conf`
+- Friendly offline page: `.deploy/offline.html`
+- Windows tunnel lifecycle: `.deploy/windows/`
+- Character and third-party notices: `demo/assets/avatars/LICENSES.md` and
+  `demo/assets/vendor/LICENSE.three.txt`
+
+Model weights, generated motions, executables, logs, and local credentials are
+intentionally excluded from Git. The public editor is available only while the
+Windows backend and its reverse tunnel are running.
+
 ## Status
 
 `Kimodo-SMPLX-RP-v1` accepts either a UTF-8 prompt or a precomputed LLM2Vec

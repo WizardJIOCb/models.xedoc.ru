@@ -29,6 +29,9 @@ var modelUI []byte
 //go:embed assets/localai.png
 var localAILogo []byte
 
+//go:embed assets
+var assetFiles embed.FS
+
 type animation struct {
 	ID             string `json:"id"`
 	Prompt         string `json:"prompt"`
@@ -176,6 +179,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(modelUI)
 	})
+	mux.Handle("/assets/", http.FileServer(http.FS(assetFiles)))
 	mux.HandleFunc("/api/animations", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(g.list())

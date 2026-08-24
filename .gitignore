@@ -18,6 +18,7 @@
 /.cache/
 /.agents/
 /.codex/
+/.deploy/windows/.state/
 
 # Downloaded/derived model and reference assets
 /models/*

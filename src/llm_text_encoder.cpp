@@ -60,7 +60,8 @@ struct component {
 std::unique_ptr<component> open_component(const std::filesystem::path &path, ggml_backend_t backend) {
     auto result = std::make_unique<component>();
     gguf_init_params params{true, &result->ctx};
-    result->file = gguf_init_from_file(path.c_str(), params);
+    const auto native_path = path.string();
+    result->file = gguf_init_from_file(native_path.c_str(), params);
     if (!result->file || !result->ctx)
         throw std::runtime_error("cannot load text component " + path.string());
     result->weights = ggml_backend_alloc_ctx_tensors(result->ctx, backend);
