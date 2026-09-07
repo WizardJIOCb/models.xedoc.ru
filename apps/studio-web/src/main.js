@@ -338,6 +338,7 @@ function jobProgress(job) { return Math.max(0, Math.min(100, Math.round(Number(j
 function rigErrorText(error) {
   const text = String(error || '');
   const translated = [
+    [/Модель повёрнута спиной/, 'В предыдущей попытке распознаватель перепутал стороны тела. Алгоритм обновлён: проверь вид «Спереди» и повтори создание скелета.'],
     [/Both legs must be visibly separated/i, 'На референсе обе ноги должны быть видны и отделены друг от друга.'],
     [/Both arms must hang apart|Both complete arms/i, 'Обе руки должны полностью попадать в модель и различаться на фоне туловища. Выровняй персонажа и повтори подготовку.'],
     [/Both complete feet/i, 'Обе ступни должны целиком попадать в изображение.'],
@@ -975,7 +976,7 @@ function renderMotions(job) {
     select.value = state.selectedMotion === 'base' ? '' : state.selectedMotion || '';
     select.disabled = !job || !(own.length || library.length);
     const notice = $('motion-library-status');
-    notice.textContent = state.motionLibraryError || (!state.motionLibraryReady ? 'Загружаем готовые движения…' : !hasRig(job) ? 'Движения доступны после создания скелета. Подготовь персонажа ниже — список включится автоматически.' : !canPlay ? 'Заверши редактирование, чтобы воспроизвести движение.' : library.length ? 'Первое открытие подготавливает движение для этой модели. Затем используется сохранённая версия.' : 'Готовых движений пока нет.');
+    notice.textContent = state.motionLibraryError || (!state.motionLibraryReady ? 'Загружаем готовые движения…' : !hasRig(job) ? (isShared ? 'Движения станут доступны, когда владелец создаст скелет модели.' : 'Движения доступны после создания скелета. Подготовь персонажа ниже — список включится автоматически.') : !canPlay ? 'Заверши редактирование, чтобы воспроизвести движение.' : library.length ? 'Первое открытие подготавливает движение для этой модели. Затем используется сохранённая версия.' : 'Готовых движений пока нет.');
     notice.hidden = !job;
   } else {
     $('motions-list').innerHTML = motions.map((motion) => `<div class="motion-row ${state.selectedMotion === motion.id ? 'selected' : ''}"><div class="motion-icon">${icon(motion.status === 'complete' ? 'play' : motion.status === 'failed' ? 'close' : 'reset')}</div><div class="motion-info"><strong>${escape(motion.prompt || 'Движение')}</strong><span>${motion.status === 'complete' ? `${Math.round((motion.frames || 150) / (motion.fps || 30))} с · готово` : escape(motion.status === 'failed' ? motion.error || 'Ошибка генерации' : stageText(motion.stage, 'В очереди'))}</span></div>${motion.status === 'complete' && motion.glbUrl ? `<button class="icon-button ${state.selectedMotion === motion.id ? 'active' : ''}" data-motion="${escape(motion.id)}" title="Посмотреть анимацию" aria-label="Посмотреть анимацию">${icon('play')}</button><a class="icon-button" href="${escape(motion.glbUrl)}" download title="Скачать GLB с анимацией" aria-label="Скачать GLB с анимацией">${icon('download')}</a>` : ''}</div>`).join('');
