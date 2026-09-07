@@ -28,6 +28,7 @@ from pixal_pipeline import ComfyPipeline, glb_summary
 from manual_rig import validate_manual
 from community import Community
 from environment import Environment, payload as environment_payload, texture_paths as environment_texture_paths
+from mesh_edits import MeshEdits, active_path as mesh_path, history_paths as mesh_history_paths, payload as mesh_payload
 
 LOG = logging.getLogger('model-studio')
 DATA = ROOT / 'data'
@@ -81,6 +82,7 @@ class Studio:
         self.rates = {}
         self.community = Community(self, DATA, JOB_ROOT)
         self.environment = Environment(self, JOB_ROOT)
+        self.mesh_edits = MeshEdits(self, JOB_ROOT)
 
     def save(self, job):
         job['updatedAt'] = now()
@@ -99,6 +101,9 @@ class Studio:
         if 'artifacts' in job and 'createdAt' in job:
             result.update(self.community.owner_fields(job, author_cache, model_counts))
             result['environment'] = environment_payload(job, self.file_url(job, ''))
+            result['meshEdit'] = mesh_payload(job)
+            if result.get('artifacts', {}).get('modelUrl'):
+                result['artifacts']['modelUrl'] = self.file_url(job, mesh_path(job))
         return result
 
     def owned(self, request):
@@ -250,7 +255,9 @@ class Studio:
         rig.update(status='running', stage='Построение скелета и весов', progress=15, error=None)
         self.save(job)
         try:
-            args = ['--input', JOB_ROOT / job['id'] / 'model.glb', '--output-dir', directory]
+            args = ['--input', JOB_ROOT / job['id'] / mesh_path(job), '--output-dir', directory]
+            if mesh_path(job) != 'model.glb':
+                args.extend(['--bounds-input', JOB_ROOT / job['id'] / 'model.glb'])
             for axis in ('x', 'y', 'z'):
                 args.extend([f'--rotation-{axis}', rig['rotation'][axis]])
             manual = rig.get('_manualInput')
@@ -505,6 +512,8 @@ class Studio:
             raise web.HTTPConflict(text='Дождитесь завершения построения скелета.')
         if any(m['status'] in ('queued', 'running') for m in job['motions']):
             raise web.HTTPConflict(text='Анимация для этой модели уже в очереди.')
+        mesh_revision = mesh_payload(job)['revision']
+        rig_source = (job['rig'].get('revision', 'legacy'), job['rig'].get('_path', 'rig/rigged.glb'))
         data = await self.json_object(request)
         prompt = str(data.get('prompt', '')).strip()
         try:
@@ -519,6 +528,11 @@ class Studio:
             raise web.HTTPTooManyRequests(text='Очередь заполнена. Повторите позже.')
         if self.owned(request) is not job:
             raise web.HTTPNotFound(text='Модель удалена.')
+        if job['status'] != 'complete' or not job['rig'].get('available'):
+            raise web.HTTPConflict(text='Сначала нужна готовая модель со скелетом.')
+        if (mesh_payload(job)['revision'] != mesh_revision
+                or (job['rig'].get('revision', 'legacy'), job['rig'].get('_path', 'rig/rigged.glb')) != rig_source):
+            raise web.HTTPConflict(text='Модель или скелет изменились. Откройте актуальную модель и повторите запуск движения.')
         if any(m['status'] in ('queued', 'running') for m in job['motions']):
             raise web.HTTPConflict(text='Анимация для этой модели уже в очереди.')
         if job['rig'].get('status') in ('queued', 'running'):
@@ -777,7 +791,7 @@ class Studio:
         return job, token
 
     def shared_files(self, job):
-        files = {'model.glb'}
+        files = {mesh_path(job)}
         files.update(environment_texture_paths(job, active_only=True).values())
         if job.get('rig', {}).get('available'):
             files.add(job['rig'].get('_path', 'rig/rigged.glb'))
@@ -787,9 +801,10 @@ class Studio:
     def shared_payload(self, job, prefix, include_prompts=True):
         shared = {key: job[key] for key in ('id', 'title', 'name', 'mode', 'stats', 'placement', 'modelRotation', 'updatedAt') if key in job}
         shared.update(status='complete', stage='Готово', progress=100,
-                      artifacts={'modelUrl': prefix + 'model.glb'},
+                      artifacts={'modelUrl': prefix + mesh_path(job)},
                       rig={'available': False, 'status': 'not_requested'}, motions=[])
         shared['environment'] = environment_payload(job, prefix, active_only=True)
+        shared['meshEdit'] = mesh_payload(job)
         if 'rotation' in job.get('rig', {}):
             shared['rig']['rotation'] = job['rig']['rotation']
         if job.get('rig', {}).get('available'):
@@ -820,12 +835,13 @@ class Studio:
         path = JOB_ROOT / job['id'] / name
         if not path.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(path, headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
+        return web.FileResponse(path, headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
 
     async def file(self, request):
         job = self.owned(request)
         name = request.match_info['file']
         permitted = {'input.png', 'model.glb', 'preview.webp'} | {f"motions/{m['id']}/animated.glb" for m in job['motions'] if m['status'] == 'complete'}
+        permitted.update(mesh_history_paths(job))
         permitted.update(environment_texture_paths(job).values())
         permitted.update(version['path'] for version in job.get('_rigVersions', []))
         if job['rig'].get('available'):
@@ -837,13 +853,14 @@ class Studio:
         path = JOB_ROOT / job['id'] / name
         if not path.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(path, headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
+        policy = 'no-store' if name == 'input.png' else 'private, no-cache'
+        return web.FileResponse(path, headers={'Cache-Control': policy, 'X-Content-Type-Options': 'nosniff'})
 
     async def demo(self, request):
         file = DATA / 'demo' / 'doom-rigged.glb'
         if not file.exists():
             raise web.HTTPNotFound(text='Демо-модель не установлена.')
-        return web.FileResponse(file)
+        return web.FileResponse(file, headers={'Cache-Control': 'private, no-cache'})
 
     async def json_object(self, request):
         if request.content_type != 'application/json':
@@ -928,7 +945,13 @@ async def sessions(request, handler):
         response.set_cookie('model_studio_session', owner, max_age=30 * 86400, httponly=True, samesite='Lax', secure=request.headers.get('X-Forwarded-Proto') == 'https')
     response.headers['X-Content-Type-Options'] = 'nosniff'
     if request.path.startswith('/api/model-studio'):
-        response.headers['Cache-Control'] = 'no-store'
+        # Only artifact handlers opt into browser storage. Revalidation still
+        # runs their ownership/share/visibility checks before FileResponse can
+        # return an ETag/Last-Modified 304; JSON, errors and input stay no-store.
+        cacheable_asset = (isinstance(response, web.FileResponse) and response.status == 200
+                           and response.headers.get('Cache-Control') == 'private, no-cache')
+        if not cacheable_asset:
+            response.headers['Cache-Control'] = 'no-store'
     return response
 
 
@@ -950,6 +973,8 @@ def create_app():
     app.add_routes([web.get(prefix + '/health', studio.health), web.get(prefix + '/jobs', studio.jobs_list),
                     web.post(prefix + '/jobs', studio.create_job), web.get(prefix + '/jobs/{job_id}', studio.job_get),
                     web.delete(prefix + '/jobs/{job_id}', studio.delete_job),
+                    web.post(prefix + '/jobs/{job_id}/mesh-edit', studio.mesh_edits.edit),
+                    web.post(prefix + '/jobs/{job_id}/mesh-restore', studio.mesh_edits.restore),
                     web.patch(prefix + '/jobs/{job_id}/placement', studio.placement),
                     web.put(prefix + '/jobs/{job_id}/environment', studio.environment.update),
                     web.post(prefix + '/jobs/{job_id}/share', studio.share_create),

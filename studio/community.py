@@ -195,13 +195,15 @@ class Community:
     def owner_fields(self, job, author_cache=None, model_counts=None):
         fields = {'visibility': job.get('visibility', 'private'), 'title': job.get('title', f"Модель {job['id'][:6]}"),
                   'description': job.get('description', ''), 'author': self.author(job, author_cache, model_counts), 'previewUrl': None}
-        if (self.job_root / job['id'] / 'preview.webp').is_file():
+        if not job.get('_previewInvalidated') and (self.job_root / job['id'] / 'preview.webp').is_file():
             fields['previewUrl'] = self.studio.file_url(job, 'preview.webp') + '?v=' + str(job.get('_previewRevision', '1'))
         return fields
 
     def summary(self, job, author_cache=None, model_counts=None):
         preview = None
         try:
+            if job.get('_previewInvalidated'):
+                raise web.HTTPNotFound()
             self.model_file(job, 'preview.webp')
             preview = f"/api/model-studio/models/{job['id']}/preview?v={job.get('_previewRevision', '1')}"
         except web.HTTPNotFound:
@@ -355,11 +357,13 @@ class Community:
         name = request.match_info['file']
         if name not in self.studio.shared_files(job):
             raise web.HTTPNotFound(text='Файл модели не найден.')
-        return web.FileResponse(self.model_file(job, name), headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
+        return web.FileResponse(self.model_file(job, name), headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
 
     async def model_preview(self, request):
         job = self.public_model(request)
-        return web.FileResponse(self.model_file(job, 'preview.webp'), headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
+        if job.get('_previewInvalidated'):
+            raise web.HTTPNotFound(text='Превью обновляется.')
+        return web.FileResponse(self.model_file(job, 'preview.webp'), headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
 
     async def publication(self, request):
         job = self.studio.owned(request)
@@ -387,6 +391,7 @@ class Community:
 
     async def preview(self, request):
         job = self.studio.owned(request)
+        mesh_revision = job.get('meshEdit', {}).get('revision', 0)
         if request.content_type != 'application/json':
             raise web.HTTPBadRequest(text='Ожидается JSON с изображением превью.')
         raw = bytearray()
@@ -415,12 +420,14 @@ class Community:
             raise web.HTTPBadRequest(text='Некорректное превью: до 2 МБ и 4 мегапикселей.')
         if self.studio.owned(request) is not job:
             raise web.HTTPNotFound(text='Модель удалена.')
+        if job.get('meshEdit', {}).get('revision', 0) != mesh_revision:
+            raise web.HTTPConflict(text='Геометрия изменилась. Обнови превью модели.')
         self.model_file(job, 'model.glb')
         path = self.job_root / job['id'] / 'preview.webp'
         temporary = path.with_name('preview.upload.tmp')
         temporary.write_bytes(output.getvalue())
         temporary.replace(path)
-        candidate = {**job, '_previewRevision': secrets.token_hex(8)}
+        candidate = {**job, '_previewRevision': secrets.token_hex(8), '_previewInvalidated': False}
         self.studio.save(candidate)
         job.update(candidate)
         return web.json_response({'job': self.studio.public(job)})

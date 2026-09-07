@@ -21,6 +21,7 @@ const fixture = new Function('THREE', `
   let ready = true, orientationPreview = true, sourceOrientation = true, playing = false, animationTime = 8;
   let mixer, action;
   const manualEditor = { refreshModel(){}, enabled:false };
+  const meshEditor = { refreshModel(){}, getStatus(){return {enabled:false};} };
   const props = [], container = { dataset: {} }, previewRotation = { x:0,y:0,z:0 };
   const model = new THREE.Group();
   const geometry = new THREE.BoxGeometry(1, 2, .5).translate(0, 1, 0);

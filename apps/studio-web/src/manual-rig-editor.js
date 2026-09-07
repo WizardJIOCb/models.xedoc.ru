@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { getStudioFrameBounds } from './studio-frame.js';
 
 export const MANUAL_RIG_JOINT_IDS = [
   'head', 'neck',
@@ -160,7 +161,7 @@ export function createManualRigEditor({ scene, camera, canvas, container, contro
       model.updateMatrixWorld(true);
       // Precise vertex bounds match the backend even for a rotated source whose
       // transformed local bounding box contains substantial empty space.
-      const bounds = new THREE.Box3().setFromObject(model, true);
+      const bounds = getStudioFrameBounds(model) || new THREE.Box3().setFromObject(model, true);
       const center = bounds.getCenter(new THREE.Vector3());
       overlay.position.set(center.x, bounds.min.y, center.z);
       overlay.scale.setScalar(Math.max(bounds.max.y - bounds.min.y, 0.001) / 2);

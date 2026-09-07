@@ -302,6 +302,19 @@ def run(args):
     source = args.input.resolve()
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    reference_points = None
+    if args.bounds_input:
+        # Keep the saved manual landmark frame after removing an extremity or
+        # whole component. Geometry comes from the edited file below.
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        bpy.ops.import_scene.gltf(filepath=str(args.bounds_input.resolve()))
+        reference_points = np.asarray([
+            (obj.matrix_world @ vertex.co)[:]
+            for obj in bpy.context.scene.objects if obj.type == "MESH"
+            for vertex in obj.data.vertices
+        ])
+        if not len(reference_points) or not np.isfinite(reference_points).all():
+            raise ValueError("The original model has no valid normalization frame")
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.gltf(filepath=str(source))
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
@@ -326,7 +339,8 @@ def run(args):
                 Quaternion((0, 0, 1), math.radians(args.rotation_z)))
     matrix = np.asarray((coordinate @ rotation @ coordinate.inverted()).to_matrix())
     points = points @ matrix.T
-    lo, hi = points.min(0), points.max(0)
+    frame = points if reference_points is None else reference_points @ matrix.T
+    lo, hi = frame.min(0), frame.max(0)
     if hi[2] - lo[2] < 0.001:
         raise ValueError("The model has no upright height")
     offset = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
@@ -439,6 +453,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--triangles", type=int, default=50000)
     parser.add_argument("--manual-points", type=Path)
+    parser.add_argument("--bounds-input", type=Path, help="Original unedited GLB for stable normalization")
     parser.add_argument("--facing", choices=("front", "back"), default="front")
     for axis in 'xyz':
         parser.add_argument(f'--rotation-{axis}', type=float, default=0)

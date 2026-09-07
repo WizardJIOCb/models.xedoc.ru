@@ -269,6 +269,7 @@ export function createManualRigPanel({ getJob, getViewer, getRotation, request, 
   return { render, flush, prepare,
     manual: (job) => draftFor(job)?.mode === 'manual',
     payload: (job) => ({ version: 1, points: clone(draftFor(job).points) }),
+    forget(jobId) { clearTimeout(drafts.get(jobId)?.timer); drafts.delete(jobId); if (getJob()?.id === jobId) getViewer()?.setManualRig?.({ enabled: false }); },
     reset() { for (const draft of drafts.values()) clearTimeout(draft.timer); drafts.clear(); clientId = crypto.randomUUID(); getViewer()?.setManualRig?.({ enabled: false }); },
   };
 }

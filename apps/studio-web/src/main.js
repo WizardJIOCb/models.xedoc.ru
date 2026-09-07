@@ -5,6 +5,7 @@ import './community-integration.css';
 import { mountCommunityHeader, mountGallerySection, mountComments, renderPublicationPanel } from './community.js';
 import { renderEnvironmentPanel, getEnvironmentPreview, saveEnvironmentPanel } from './environment-panel.js';
 import { manualRigMarkup, createManualRigPanel } from './manual-rig-panel.js';
+import { createMeshEditPanel } from './mesh-edit-panel.js';
 
 const API = '/api/model-studio';
 const settingsClientId = crypto.randomUUID();
@@ -55,6 +56,7 @@ const state = {
   previewUploads: new Set(),
   authRevision: 0,
   commentsModelId: null, disposeComments: null,
+  meshEditingId: null, meshEntryPending: false, meshReturnView: null,
 };
 
 document.title = `${isPlayground ? 'Playground' : 'Генерация 3D-моделей'} · models.xedoc.ru`;
@@ -131,6 +133,13 @@ const manualRigPanel = isPlayground && !isShared ? createManualRigPanel({
     state.viewer?.setOrientation(rotation);
     renderRigPreparation();
   },
+}) : null;
+
+const meshEditPanel = isPlayground && !isShared ? createMeshEditPanel({
+  element: $('mesh-edit-panel'), getJob, getViewer: () => state.viewer, request, toast,
+  onEnter: enterMeshCleanup,
+  onExit: exitMeshCleanup,
+  onSaved: receiveCleanedModel,
 }) : null;
 
 function viewerMarkup() {
@@ -211,6 +220,7 @@ function playgroundMarkup() {
     <aside class="panel playground-controls">
       <div class="panel-heading"><span class="step-number">01</span><h2>Испытай персонажа</h2></div>
       <div class="playground-content"><div class="selected-model-name" id="playground-model-name">Модель не выбрана</div><p class="field-hint" id="playground-hint">Открой свою модель из библиотеки ниже или начни с демо.</p>
+        <div id="mesh-edit-panel" hidden></div>
         ${rigPreparationMarkup()}
         ${placementMarkup()}
         <div id="environment-panel" hidden></div>
@@ -276,18 +286,21 @@ function rigBusy(job) {
 }
 function canDeleteJob(job) {
   return !isShared && ['complete', 'failed'].includes(job.status) && !rigBusy(job) && state.rigSubmittingId !== job.id &&
+    state.meshEditingId !== job.id &&
     !(state.animating && state.selectedId === job.id) &&
     !job.motions?.some((motion) => ['queued', 'running'].includes(motion.status));
 }
 function sourceView(job) {
   if (!job) return false;
+  if (state.meshEditingId === job.id) return true;
   if (!hasRig(job)) return true;
   const rotation = placementDraft(job).rotation;
   const baked = normalizeModelRotation(job.rig?.appliedRotation);
   return ['x', 'y', 'z'].some((axis) => Math.abs(rotation[axis] - baked[axis]) > 0.001) ||
     (!isShared && isPlayground && state.rigEditingId === job.id);
 }
-function preparingRig(job = getJob()) { return Boolean(!isShared && isPlayground && !state.demo && job?.status === 'complete' && job?.artifacts?.modelUrl && sourceView(job)); }
+function preparingRig(job = getJob()) { return Boolean(!isShared && isPlayground && !state.demo && state.meshEditingId !== job?.id && job?.status === 'complete' && job?.artifacts?.modelUrl && sourceView(job)); }
+function editingMesh(job = getJob()) { return Boolean(job && state.meshEditingId === job.id); }
 function rigDraft(job) {
   let draft = state.rigDrafts.get(job.id);
   if (!draft) {
@@ -328,7 +341,9 @@ async function request(path, options = {}) {
   if (!response.ok) {
     const detail = data?.detail || data?.error || data?.message;
     const message = typeof detail === 'string' ? detail : detail ? JSON.stringify(detail) : response.status === 502 || response.status === 503 ? 'Компьютер сейчас недоступен. Запусти start.bat на своём ПК.' : plainError || `Сервер вернул ошибку ${response.status}.`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   if (data === null) throw new Error('Неожиданный ответ сервиса. Обнови страницу и попробуй ещё раз.');
   return data;
@@ -401,9 +416,9 @@ function syncPlacementControls(position, preserveFocused = true) {
 function renderPlacement() {
   if (!isPlayground) return;
   const job = getJob();
-  const visible = !state.demo && job?.status === 'complete' && Boolean(artifactUrl(job));
+  const visible = !state.demo && !editingMesh(job) && job?.status === 'complete' && Boolean(artifactUrl(job));
   $('placement-panel').hidden = !visible;
-  if (!visible) { manualRigPanel?.render(null); return; }
+  if (!visible) { if (!editingMesh(job)) manualRigPanel?.render(null); return; }
   const draft = placementDraft(job);
   $('placement-fields').disabled = isShared || !state.viewerState.ready;
   $('placement-hint').textContent = isShared ? 'Положение и поворот сохранены владельцем. Здесь доступен просмотр.' : 'Сдвиг по сцене, в метрах. Y — высота над полом. Положение и поворот сохраняются автоматически.';
@@ -494,7 +509,7 @@ function persistSettingsOnExit() {
 
 function updatePlacement(position, { preserveFocused = true } = {}) {
   const job = getJob();
-  if (isShared || !job || job.status !== 'complete' || !state.viewerState.ready) return;
+  if (isShared || !job || editingMesh(job) || job.status !== 'complete' || !state.viewerState.ready) return;
   const draft = placementDraft(job);
   draft.position = normalizePlacement(position);
   draft.version++;
@@ -520,12 +535,114 @@ function syncRotationControls(rotation, { preserveFocused = false } = {}) {
   }
 }
 
+function renderMeshCleanup() {
+  if (!isPlayground || !meshEditPanel) return;
+  const job = getJob();
+  const visible = !isShared && !state.demo && job?.status === 'complete' && Boolean(job?.artifacts?.modelUrl);
+  const busy = Boolean(job && (rigBusy(job) || state.rigSubmittingId === job.id || state.animating || state.deleting || state.sharing || job.motions?.some((motion) => ['queued', 'running'].includes(motion.status))));
+  meshEditPanel.render(job, { visible, busy, ready: Boolean(state.viewerState.ready) });
+  const editing = editingMesh(job);
+  document.querySelector('.playground-layout')?.classList.toggle('mesh-edit-active', editing);
+  if (editing) {
+    $('playground-hint').textContent = 'Выделяй лишние части и удаляй их из модели. Результат появится по общей ссылке после сохранения.';
+    for (const id of ['strike', 'reset', 'power', 'slow', 'physics', 'pause', 'playground-motion', 'share-model']) $(id).disabled = true;
+  } else $('share-model').disabled = state.sharing;
+}
+
+async function enterMeshCleanup() {
+  const job = getJob(), authRevision = state.authRevision;
+  if (!job || isShared || rigBusy(job)) throw new Error('Дождись готовности модели.');
+  state.meshReturnView = { id: job.id, rigEditingId: state.rigEditingId, selectedMotion: state.selectedMotion };
+  state.meshEditingId = job.id;
+  state.meshEntryPending = true;
+  state.selectionSignature = '';
+  manualRigPanel?.render(null);
+  renderMeshCleanup();
+  renderRigPreparation();
+  renderPlacement();
+  renderJobs();
+  try {
+    await flushModelSettings(job.id);
+    if (state.authRevision !== authRevision || getJob()?.id !== job.id || state.meshEditingId !== job.id) return;
+    await manualRigPanel?.flush(job);
+    if (state.authRevision !== authRevision || getJob()?.id !== job.id || state.meshEditingId !== job.id) return;
+    state.viewer?.setManualRig?.({ enabled: false });
+    await loadSelectedViewer(true);
+    if (state.authRevision !== authRevision || getJob()?.id !== job.id || state.meshEditingId !== job.id) return;
+    if (!state.viewerState.ready) throw new Error($('viewer-error-text').textContent || 'Не удалось открыть исходную модель для очистки.');
+    state.viewer?.setManualRig?.({ enabled: false });
+  } finally {
+    if (state.authRevision === authRevision && getJob()?.id === job.id && state.meshEditingId === job.id) {
+      state.meshEntryPending = false;
+      renderMeshCleanup();
+    }
+  }
+}
+
+async function exitMeshCleanup({ reason } = {}) {
+  // Successful persistence already loaded the fresh mesh. Do not reload twice.
+  if (reason === 'saved') { renderMeshCleanup(); return; }
+  const previous = state.meshReturnView;
+  state.meshEditingId = null;
+  state.meshEntryPending = false;
+  state.meshReturnView = null;
+  if (previous?.id === getJob()?.id) {
+    state.rigEditingId = previous.rigEditingId;
+    state.selectedMotion = previous.selectedMotion;
+  }
+  state.selectionSignature = '';
+  renderSelection();
+  renderJobs();
+  await state.viewerLoadPromise;
+}
+
+async function receiveCleanedModel(updated) {
+  const id = updated.id, authRevision = state.authRevision;
+  if (getJob()?.id !== id || isShared) return;
+  state.meshEditingId = null;
+  state.meshReturnView = null;
+  state.rigEditingId = null;
+  state.selectedMotion = 'base';
+  state.rigDrafts.delete(id);
+  manualRigPanel?.forget(id);
+  // Suppress automatic loading until the owner payload has been replaced.
+  state.meshEntryPending = true;
+  state.previewUploads.delete(id);
+  try {
+    receiveOwnerJob(updated);
+    const query = new URLSearchParams({ job: id });
+    history.replaceState(null, '', `/playground?${query}`);
+    await loadSelectedViewer(true);
+    if (state.authRevision !== authRevision || getJob()?.id !== id) return;
+    if (!state.viewerState.ready) throw new Error('Не удалось открыть сохранённую модель.');
+    // Saved landmarks remain useful after cleanup; keep them out of the card.
+    state.viewer?.setManualRig?.({ enabled: false });
+    await saveModelPreview(getJob(), state.viewerRequest);
+  } finally {
+    if (state.authRevision === authRevision && getJob()?.id === id) {
+      state.meshEntryPending = false;
+      renderMeshCleanup();
+      renderRigPreparation();
+    }
+  }
+}
+
+function leaveMeshCleanup() {
+  if (!meshEditPanel) return true;
+  if (!meshEditPanel.canLeave()) return false;
+  meshEditPanel.reset();
+  state.meshEditingId = null;
+  state.meshEntryPending = false;
+  state.meshReturnView = null;
+  return true;
+}
+
 function renderRigPreparation() {
   if (!isPlayground) return;
   const job = getJob();
-  const visible = !isShared && !state.demo && job?.status === 'complete' && Boolean(job?.artifacts?.modelUrl);
+  const visible = !isShared && !state.demo && !editingMesh(job) && job?.status === 'complete' && Boolean(job?.artifacts?.modelUrl);
   $('rig-preparation').hidden = !visible;
-  if (!visible) return;
+  if (!visible) { if (!editingMesh(job)) manualRigPanel?.render(null); return; }
   const draft = rigDraft(job);
   const editing = preparingRig(job);
   const busy = rigBusy(job) || state.rigSubmittingId === job.id;
@@ -790,7 +907,7 @@ function viewReference() {
 let sharedJobId = null;
 async function shareModel() {
   const job = getJob();
-  if (isShared || state.sharing || job?.status !== 'complete' || !artifactUrl(job)) return;
+  if (isShared || state.sharing || state.meshEditingId === job?.id || job?.status !== 'complete' || !artifactUrl(job)) return;
   state.sharing = true;
   $('share-model').disabled = true;
   sharedJobId = job.id;
@@ -853,7 +970,7 @@ function onViewerState(value) {
   $('viewer-stats').textContent = value.ready ? `${Math.round(value.triangles).toLocaleString('ru')} треугольников` : '';
   $('viewer-status').textContent = state.demo ? 'ДЕМО · DOOM SLAYER' : value.ready ? value.mode === 'ragdoll' ? 'RAGDOLL АКТИВЕН' : value.clipName ? 'АНИМАЦИЯ' : 'ПРОСМОТР 3D' : 'ПРОСМОТР 3D';
   if (!isPlayground) return;
-  $('arena-mode').innerHTML = `<span class="status-dot ${value.ready ? 'online' : ''}"></span> ${value.ready ? value.orientationPreview ? 'Выравнивание исходной модели' : value.mode === 'ragdoll' ? 'Физика активна' : value.clipName ? 'Анимация воспроизводится' : 'Статичная модель' : 'Выбери модель для просмотра'}`;
+  $('arena-mode').innerHTML = `<span class="status-dot ${value.ready ? 'online' : ''}"></span> ${value.ready ? editingMesh() ? 'Очистка модели' : value.orientationPreview ? 'Выравнивание исходной модели' : value.mode === 'ragdoll' ? 'Физика активна' : value.clipName ? 'Анимация воспроизводится' : 'Статичная модель' : 'Выбери модель для просмотра'}`;
   $('arena-fps').textContent = value.ready ? `${value.fps} FPS` : 'WEBGL';
   $('hit-count').textContent = String(value.hitCount).padStart(2, '0');
   $('body-count').textContent = value.bodyCount || '—';
@@ -866,14 +983,18 @@ function onViewerState(value) {
   $('pause').disabled = !value.ready || !value.clipName || value.mode === 'ragdoll';
   renderRigPreparation();
   renderPlacement();
+  renderMeshCleanup();
 }
 
 async function loadSelectedViewer(force = false) {
   const job = getJob();
-  const prepare = preparingRig(job);
+  // Reapplying normalization or loading a newer revision would invalidate the
+  // face IDs currently selected by the author. Keep that snapshot until exit.
+  if (!force && (state.meshEntryPending || editingMesh(job))) return state.viewerLoadPromise?.catch(() => {});
+  const prepare = preparingRig(job) || editingMesh(job);
   const url = state.demo ? `${API}/demo/glb` : prepare ? job.artifacts.modelUrl : selectedUrl(job);
   if (!url) return;
-  const key = `${url}:${state.demo || hasRig(job)}:${prepare}`;
+  const key = `${url}:${state.demo || hasRig(job)}:${prepare}:${job?.meshEdit?.revision || 0}`;
   const position = placementDraft(job)?.position || { x: 0, y: 0, z: 0 };
   const rotation = sourceView(job) ? placementDraft(job).rotation : {};
   const environment = getEnvironmentPreview($('environment-panel'), job?.id) || job?.environment || {};
@@ -881,7 +1002,7 @@ async function loadSelectedViewer(force = false) {
     state.viewer?.setPosition(position);
     state.viewer?.setOrientation(rotation);
     void state.viewer?.setEnvironment(environment).catch((error) => toast(error.message));
-    return;
+    return state.viewerLoadPromise?.catch(() => {});
   }
   const requestId = ++state.viewerRequest;
   state.viewerKey = key;
@@ -907,7 +1028,7 @@ async function loadSelectedViewer(force = false) {
     if (isPlayground && sourceView(job)) viewer.frontView();
     renderRigPreparation();
     if (isPlayground) ['slow', 'physics', 'pause'].forEach((id) => $(id).setAttribute('aria-pressed', 'false'));
-    if (!isShared && !state.demo && job?.status === 'complete' && !job.previewUrl) void saveModelPreview(job, requestId);
+    if (!isShared && !state.demo && !editingMesh(job) && !state.meshEntryPending && job?.status === 'complete' && !job.previewUrl) void saveModelPreview(job, requestId);
   } catch (error) {
     if (requestId !== state.viewerRequest) return;
     $('viewer-loading').hidden = true;
@@ -968,12 +1089,18 @@ function renderPlaygroundComments(job) {
 
 function renderSelection() {
   const job = getJob();
+  if (state.meshEditingId && !job) {
+    meshEditPanel?.reset();
+    state.meshEditingId = null;
+    state.meshEntryPending = false;
+    state.meshReturnView = null;
+  }
   observeRigResult(job);
   if (job && state.selectedMotion === null) {
     const latest = [...(job.motions || [])].reverse().find((motion) => motion.status === 'complete' && motion.glbUrl);
     if (latest) state.selectedMotion = latest.id;
   }
-  const signature = JSON.stringify([job, state.selectedMotion, state.demo, state.rigEditingId, state.sharedCanEdit]);
+  const signature = JSON.stringify([job, state.selectedMotion, state.demo, state.rigEditingId, state.meshEditingId, state.sharedCanEdit]);
   if (signature === state.selectionSignature) return;
   state.selectionSignature = signature;
   renderSharedOwnerAccess();
@@ -1008,6 +1135,7 @@ function renderSelection() {
     renderRigPreparation();
     renderPlacement();
     renderMotions(job);
+    renderMeshCleanup();
   } else {
     $('result-name').textContent = job ? jobTitle(job) : 'Предпросмотр';
     const active = job && ['queued', 'running'].includes(job.status);
@@ -1045,6 +1173,8 @@ function renderSelection() {
 }
 
 function selectJob(id, { retainMotion = false } = {}) {
+  if (meshEditPanel?.isActive && id === state.selectedId && !retainMotion) return true;
+  if (!leaveMeshCleanup()) return false;
   state.selectedId = id;
   if (!retainMotion) state.selectedMotion = null;
   state.demo = false;
@@ -1054,6 +1184,7 @@ function selectJob(id, { retainMotion = false } = {}) {
   history.replaceState(null, '', `${isPlayground ? '/playground' : '/generate-model'}?${query}`);
   renderJobs();
   renderSelection();
+  return true;
 }
 
 function refreshHealth(force = false) {
@@ -1070,6 +1201,17 @@ function refreshHealth(force = false) {
     state.healthError = error.message;
     state.healthFailures++;
   }).finally(() => { state.healthPolling = false; updateHealth(); });
+}
+
+function preserveNewerJob(incoming) {
+  const current = state.jobs.find((job) => job.id === incoming?.id);
+  if (!current) return incoming;
+  const currentRevision = current.meshEdit?.revision || 0;
+  const incomingRevision = incoming.meshEdit?.revision || 0;
+  // A library GET begun before cleanup can finish after its POST. Mesh face
+  // IDs, source URL and rig availability must advance as one saved revision.
+  if (currentRevision !== incomingRevision) return currentRevision > incomingRevision ? current : incoming;
+  return String(current.updatedAt || '') > String(incoming.updatedAt || '') ? current : incoming;
 }
 
 async function poll(force = false) {
@@ -1104,18 +1246,24 @@ async function poll(force = false) {
   try {
     const tasks = [request('/jobs').then(async (result) => {
       if (authRevision !== state.authRevision) return;
-      state.jobs = (Array.isArray(result) ? result : result.jobs || []).filter((job) => !state.deletedIds.has(job.id)).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      state.jobs = (Array.isArray(result) ? result : result.jobs || []).filter((job) => !state.deletedIds.has(job.id)).map(preserveNewerJob).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
       state.jobsError = null;
       if (state.selectedId && !getJob()) {
         const selectedId = state.selectedId;
-        try { const selected = await request(`/jobs/${encodeURIComponent(selectedId)}`); if (state.selectedId === selectedId && !state.deletedIds.has(selectedId)) state.jobs.unshift(selected.job || selected); }
+        try {
+          const selected = await request(`/jobs/${encodeURIComponent(selectedId)}`);
+          if (authRevision !== state.authRevision) return;
+          if (state.selectedId === selectedId && !state.deletedIds.has(selectedId)) state.jobs.unshift(preserveNewerJob(selected.job || selected));
+        }
         catch { if (!state.jobs.length && !params.get('job')) state.selectedId = null; }
       }
+      if (authRevision !== state.authRevision) return;
       if (!state.selectedId && state.jobs.length && !state.demo) state.selectedId = state.jobs[0].id;
       setError('library-error', null);
       renderJobs();
       renderSelection();
     }).catch((error) => {
+      if (authRevision !== state.authRevision) return;
       state.jobsError = error.message;
       setError('library-error', error.message);
       if (!state.jobs.length) $('jobs-list').innerHTML = '<div class="library-empty">Библиотека появится, когда компьютер подключится.</div>';
@@ -1235,9 +1383,10 @@ $('jobs-list').addEventListener('click', (event) => {
   const button = event.target.closest('[data-job]');
   if (button) { selectJob(button.dataset.job); $('viewer-frame').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
 });
-$('retry-viewer').addEventListener('click', () => { void loadSelectedViewer(true); });
+$('retry-viewer').addEventListener('click', () => { if (!meshEditPanel?.isActive) void loadSelectedViewer(true); });
 $('open-demo').addEventListener('click', () => {
   if (!isPlayground) { location.href = '/playground?demo=1'; return; }
+  if (!leaveMeshCleanup()) return;
   state.demo = true;
   state.selectedId = null;
   state.selectedMotion = null;
@@ -1293,7 +1442,7 @@ if (!isPlayground) {
   });
   $('placement-reset').addEventListener('click', () => updatePlacement({ x: 0, y: 0, z: 0 }, { preserveFocused: false }));
   $('placement-ground').addEventListener('click', () => {
-    if (isShared) return;
+    if (isShared || editingMesh()) return;
     const position = state.viewer?.placeOnFloor();
     if (position) updatePlacement(position, { preserveFocused: false });
   });
@@ -1307,7 +1456,7 @@ if (!isPlayground) {
   $('rig-form').addEventListener('submit', submitRig);
   $('edit-rig').addEventListener('click', () => {
     const job = getJob();
-    if (!job || rigBusy(job)) return;
+    if (!job || editingMesh(job) || rigBusy(job)) return;
     state.rigEditingId = job.id;
     const draft = rigDraft(job);
     draft.error = null;
@@ -1316,7 +1465,7 @@ if (!isPlayground) {
   });
   $('cancel-rig-edit').addEventListener('click', () => {
     const job = getJob();
-    if (!job || rigBusy(job)) return;
+    if (!job || editingMesh(job) || rigBusy(job)) return;
     const settings = placementDraft(job);
     settings.rotation = normalizeModelRotation(job.rig?.appliedRotation);
     settings.version++;
@@ -1350,8 +1499,9 @@ if (!isPlayground) {
   $('slow').addEventListener('click', () => { state.slow = !state.slow; $('slow').setAttribute('aria-pressed', String(state.slow)); state.viewer?.setSlow(state.slow); });
   $('physics').addEventListener('click', () => { state.debug = !state.debug; $('physics').setAttribute('aria-pressed', String(state.debug)); state.viewer?.setDebug(state.debug); });
   $('pause').addEventListener('click', () => { state.playing = !state.playing; $('pause').setAttribute('aria-pressed', String(!state.playing)); state.viewer?.setPlaying(state.playing); });
-  $('playground-motion').addEventListener('change', () => { state.selectedMotion = $('playground-motion').value || 'base'; selectJob(state.selectedId, { retainMotion: true }); });
+  $('playground-motion').addEventListener('change', () => { if (editingMesh()) return; state.selectedMotion = $('playground-motion').value || 'base'; selectJob(state.selectedId, { retainMotion: true }); });
   window.addEventListener('keydown', (event) => {
+    if (editingMesh()) return;
     if (event.repeat || document.querySelector('dialog[open]') || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
     if (event.code === 'Space' && document.activeElement?.tagName === 'BUTTON') return;
     if (event.code === 'Space') { event.preventDefault(); $('strike').click(); }
@@ -1363,7 +1513,7 @@ if (!isPlayground) {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(true); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persistSettingsOnExit(); });
 window.addEventListener('pagehide', persistSettingsOnExit);
-window.addEventListener('pagehide', () => { state.viewer?.dispose(); if (state.filePreview) URL.revokeObjectURL(state.filePreview); });
+window.addEventListener('pagehide', () => { meshEditPanel?.reset(); state.meshEditingId = null; state.meshEntryPending = false; state.meshReturnView = null; state.viewer?.dispose(); if (state.filePreview) URL.revokeObjectURL(state.filePreview); });
 window.addEventListener('community:auth-changed', () => {
   state.authRevision++;
   if (isShared) {
@@ -1372,6 +1522,10 @@ window.addEventListener('community:auth-changed', () => {
     void poll(true);
     return;
   }
+  meshEditPanel?.reset();
+  state.meshEditingId = null;
+  state.meshEntryPending = false;
+  state.meshReturnView = null;
   manualRigPanel?.reset();
   for (const draft of state.placementDrafts.values()) clearTimeout(draft.timer);
   state.placementDrafts.clear();

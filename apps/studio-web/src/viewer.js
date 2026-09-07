@@ -5,6 +5,8 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { createRagdoll } from './ragdoll.js';
 import { createManualRigEditor } from './manual-rig-editor.js';
 import { createEnvironment } from './environment.js';
+import { createMeshEditor } from './mesh-editor.js';
+import { readStudioFramePoints } from './studio-frame.js';
 
 const BONES = ['Hips', 'Spine', 'Chest', 'Neck', 'Head', 'UpperArm_L', 'LowerArm_L', 'Hand_L', 'UpperArm_R', 'LowerArm_R', 'Hand_R', 'UpperLeg_L', 'LowerLeg_L', 'Foot_L', 'UpperLeg_R', 'LowerLeg_R', 'Foot_R'];
 let physicsPromise;
@@ -124,6 +126,10 @@ export function createViewer({ container, playground = false, onState = () => {}
     scene, camera, canvas, container, controls,
     getModel: () => ready && sourceOrientation ? model : null,
   });
+  const meshEditor = createMeshEditor({
+    scene, camera, canvas, container, controls,
+    getModel: () => ready && sourceOrientation ? model : null,
+  });
 
   function disposeObject(root) {
     const textures = new Set(), materials = new Set(), geometries = new Set();
@@ -141,6 +147,7 @@ export function createViewer({ container, playground = false, onState = () => {}
 
   function clearModel() {
     ready = false;
+    meshEditor.refreshModel();
     rigAvailable = false;
     ragdoll?.dispose();
     ragdoll = undefined;
@@ -203,19 +210,36 @@ export function createViewer({ container, playground = false, onState = () => {}
       let skins = 0;
       gltf.scene.traverse((object) => {
         if (object.isMesh) {
+          const association = gltf.parser?.associations?.get(object);
+          if (Number.isInteger(association?.meshes) && Number.isInteger(association?.primitives)) {
+            object.userData.studioPrimitive = { mesh: association.meshes, primitive: association.primitives };
+          }
           object.castShadow = object.receiveShadow = true;
           object.frustumCulled = false;
           triangles += (object.geometry.index?.count ?? object.geometry.attributes.position.count) / 3;
         }
         if (object.isSkinnedMesh) skins++;
       });
+      const sourceFramePoints = skins === 0 ? await readStudioFramePoints(gltf) : null;
+      if (disposed || sequence !== request) { disposeObject(gltf.scene); return; }
       sourceOrientation = skins === 0;
       orientationPreview = Boolean(prepare && sourceOrientation);
       // Every source view uses the same world-axis transform and normalization,
       // including shared links. A wrapper preserves the asset's own root matrix.
       // Rigged exports already contain their orientation in the bind pose.
       model = sourceOrientation ? new THREE.Group() : gltf.scene;
-      if (sourceOrientation) model.add(gltf.scene);
+      if (sourceOrientation) {
+        model.add(gltf.scene);
+        if (sourceFramePoints) model.userData.studioFramePoints = sourceFramePoints;
+        // Mesh cleanup can remove an entire extremity/primitive. Retaining the
+        // original world-space primitive boxes keeps its saved placement stable.
+        const sourceBounds = gltf.asset?.extras?.studioBounds;
+        const corners = sourceBounds?.corners;
+        if (sourceBounds?.version === 1 && Array.isArray(corners) && corners.length >= 8 && corners.length <= 8192 && corners.length % 8 === 0
+          && corners.every((point) => Array.isArray(point) && point.length === 3 && point.every((value) => Number.isFinite(value) && Math.abs(value) <= 1e12))) {
+          model.userData.studioBounds = corners.map((point) => [...point]);
+        }
+      }
       scene.add(model);
       rigAvailable = Boolean(!orientationPreview && allowRagdoll && skins && BONES.every((name) => model.getObjectByName(name)?.isBone));
       // Generated rig exports already have a 2 m bind pose on the ground. Static
@@ -247,6 +271,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       playing = true;
       ready = true;
       manualEditor.refreshModel();
+      meshEditor.refreshModel();
       resetCamera();
       emit({ loading: false, error: null });
     } catch (error) {
@@ -270,11 +295,18 @@ export function createViewer({ container, playground = false, onState = () => {}
     model.scale.setScalar(1);
     model.rotation.set(...['x', 'y', 'z'].map((axis) => THREE.MathUtils.degToRad(previewRotation[axis])), 'XYZ');
     model.updateMatrixWorld(true);
-    const bounds = new THREE.Box3().setFromObject(model);
+    const boundsForModel = () => {
+      const corners = model.userData.studioBounds;
+      if (!corners) return new THREE.Box3().setFromObject(model);
+      const box = new THREE.Box3(), point = new THREE.Vector3();
+      for (const corner of corners) box.expandByPoint(point.fromArray(corner).applyMatrix4(model.matrixWorld));
+      return box;
+    };
+    const bounds = boundsForModel();
     const extent = bounds.getSize(new THREE.Vector3());
     model.scale.setScalar(2 / Math.max(extent.x, extent.y, extent.z, 0.001));
     model.updateMatrixWorld(true);
-    const scaled = new THREE.Box3().setFromObject(model);
+    const scaled = boundsForModel();
     const center = scaled.getCenter(new THREE.Vector3());
     model.position.set(-center.x, -scaled.min.y, -center.z).add(placement);
     model.updateMatrixWorld(true);
@@ -282,6 +314,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     baseQuaternion.copy(model.quaternion);
     container.dataset.rotation = JSON.stringify(previewRotation);
     manualEditor.refreshModel();
+    meshEditor.refreshModel();
     return true;
   }
 
@@ -303,6 +336,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     basePosition.add(delta);
     model.updateMatrixWorld(true);
     manualEditor.refreshModel();
+    meshEditor.refreshModel();
     for (const entry of ragdoll?.bodyEntries || []) {
       const translated = new THREE.Vector3().copy(entry.body.translation()).add(delta);
       entry.body.setTranslation(translated, true);
@@ -346,7 +380,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   }
 
   function hit(point) {
-    if (!ready || !ragdoll || manualEditor.enabled) return false;
+    if (!ready || !ragdoll || manualEditor.enabled || meshEditor.getStatus().enabled) return false;
     const center = point?.clone() ?? model.getObjectByName('Chest').getWorldPosition(new THREE.Vector3());
     const direction = center.clone().sub(camera.position);
     direction.y = 0;
@@ -369,7 +403,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   let pointerStart;
   function pointerDown(event) { pointerStart = { x: event.clientX, y: event.clientY, time: performance.now() }; }
   function pointerUp(event) {
-    if (manualEditor.enabled || !playground || !pointerStart || !ready || !ragdoll || event.button !== 0) return;
+    if (manualEditor.enabled || meshEditor.getStatus().enabled || !playground || !pointerStart || !ready || !ragdoll || event.button !== 0) return;
     if (Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5 || performance.now() - pointerStart.time > 500) return;
     const rect = canvas.getBoundingClientRect();
     pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
@@ -404,7 +438,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     const dt = realDt * (slow ? 0.2 : 1);
     accumulator = Math.min(accumulator + dt, 0.1);
     while (accumulator >= STEP) {
-      if (ready && !ragdoll?.enabled && playing && !manualEditor.enabled) {
+      if (ready && !ragdoll?.enabled && playing && !manualEditor.enabled && !meshEditor.getStatus().enabled) {
         animationTime += STEP;
         if (patrol) {
           const angle = animationTime * 0.29;
@@ -429,7 +463,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       particle.mesh.material.opacity = Math.min(1, particle.life * 4);
       if (particle.life <= 0) { particle.mesh.removeFromParent(); disposeObject(particle.mesh); particles.splice(i, 1); }
     }
-    if (playground && ready && !orientationPreview && !manualEditor.enabled && model.getObjectByName('Hips')) {
+    if (playground && ready && !orientationPreview && !manualEditor.enabled && !meshEditor.getStatus().enabled && model.getObjectByName('Hips')) {
       const target = model.getObjectByName('Hips').getWorldPosition(new THREE.Vector3());
       target.y = Math.max(0.55, Math.min(1.1, target.y));
       controls.target.lerp(target, 1 - Math.exp(-realDt * 1.2));
@@ -445,7 +479,12 @@ export function createViewer({ container, playground = false, onState = () => {}
   return {
     load, hit, reset, resetCamera, frontView, setPosition, placeOnFloor,
     setEnvironment: stage.setEnvironment,
-    setManualRig(options) { manualEditor.setState(options); },
+    meshEditor,
+    setManualRig(options) {
+      const cleaning = meshEditor.getStatus().enabled;
+      manualEditor.setState(cleaning ? { ...options, enabled: false } : options);
+      if (cleaning) meshEditor.refreshModel();
+    },
     manualView(direction) { return manualEditor.view(direction); },
     capturePreview() {
       if (!ready || disposed || !canvas.width || !canvas.height) return null;
@@ -458,7 +497,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       preview.getContext('2d').drawImage(canvas, 0, 0, preview.width, preview.height);
       return preview.toDataURL('image/webp', 0.86);
     },
-    setOrientation(rotation) { if (manualEditor.enabled) return false; const changed = applyPreviewRotation(rotation); if (changed) emit(); return changed; },
+    setOrientation(rotation) { if (manualEditor.enabled || meshEditor.getStatus().enabled) return false; const changed = applyPreviewRotation(rotation); if (changed) emit(); return changed; },
     setPower(value) { power = Math.max(1, Math.min(10, Number(value))); },
     setSlow(value) { slow = Boolean(value); emit(); },
     setPlaying(value) { playing = Boolean(value); emit(); },
@@ -470,6 +509,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       renderer.setAnimationLoop(null);
       clearModel();
       manualEditor.dispose();
+      meshEditor.dispose();
       observer.disconnect();
       canvas.removeEventListener('pointerdown', pointerDown);
       canvas.removeEventListener('pointerup', pointerUp);
