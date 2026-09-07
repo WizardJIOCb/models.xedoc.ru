@@ -1,0 +1,36 @@
+.library-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.job-select { display: flex; align-items: center; gap: 13px; flex: 1; min-width: 0; align-self: stretch; text-align: left; background: transparent; padding: 0; border: 0; border-radius: 6px; }
+.job-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.job-delete { flex: 0 0 30px; width: 30px; height: 32px; color: #839ba6; }
+.job-delete:hover:not(:disabled), .delete-failed-button:hover:not(:disabled) { color: #ffb6ac; border-color: #88564d; background: #312122; }
+.job-delete:disabled { opacity: .3; cursor: not-allowed; }
+.delete-dialog, .share-dialog { width: min(460px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); overflow: auto; margin: auto; padding: 25px; border: 1px solid #344854; border-radius: 15px; background: #101a22; color: #d6e3e9; box-shadow: 0 24px 80px #0009; }
+.delete-dialog::backdrop, .share-dialog::backdrop { background: #03090eb8; backdrop-filter: blur(4px); }
+.delete-dialog h2, .share-dialog h2 { font-size: 19px; font-weight: 550; line-height: 1.4; }
+.delete-dialog p, .share-dialog p { color: #95abba; font-size: 12px; line-height: 1.8; margin-top: 12px; }
+.delete-names { margin: 18px 0; padding-left: 20px; color: #d0dee5; font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+.delete-dialog-actions, .share-dialog-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 23px; }
+.button-danger { color: #ffe2db; background: #813c37; border-color: #a95b52; }
+.button-danger:hover:not(:disabled) { background: #98453d; border-color: #d08174; }
+#delete-error { white-space: pre-line; }
+.shared-note { color: #8db8c4; font-size: 12px; margin: 0 0 16px; line-height: 1.6; }
+.share-dialog input { width: 100%; margin-top: 17px; border: 1px solid #36515e; border-radius: 7px; padding: 12px; background: #0a1219; color: #bee2e7; font-size: 12px; }
+.share-control { margin-top: 10px; }
+.share-dialog-actions { flex-wrap: wrap; }
+.result-actions { flex-wrap: wrap; }
+.result-actions .reference-control { font-size: 11px; padding: 9px 11px; }
+.reference-dialog { width: min(980px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto; padding: 20px; overflow: auto; border: 1px solid #344854; border-radius: 15px; background: #101a22; color: #d6e3e9; box-shadow: 0 24px 80px #0009; }
+.reference-dialog::backdrop { background: #03090ecc; backdrop-filter: blur(4px); }
+.reference-dialog-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 16px; }
+.reference-dialog-heading>div { min-width: 0; }
+.reference-dialog h2 { font-size: 19px; font-weight: 550; line-height: 1.4; }
+.reference-dialog-heading p { font-size: 11px; color: #95abba; line-height: 1.6; margin-top: 7px; overflow-wrap: anywhere; }
+.reference-image-frame { min-height: 260px; display: grid; place-items: center; background: #091118; border: 1px solid #263b47; border-radius: 9px; overflow: hidden; }
+.reference-image-frame img { display: block; width: auto; height: auto; max-width: 100%; max-height: calc(100dvh - 195px); object-fit: contain; }
+.reference-loading { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 28px; color: #94b7c2; font-size: 12px; text-align: center; }
+.reference-load-error { display: flex; flex-direction: column; align-items: center; gap: 17px; max-width: 430px; text-align: center; padding: 28px; color: #d3aaa3; font-size: 12px; line-height: 1.7; }
+.reference-dialog-footer { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 12px; }
+.reference-dialog-footer>span { color: #7995a5; font-size: 10px; font-variant-numeric: tabular-nums; }
+.reference-dialog-footer .button { font-size: 10px; }
+@media (max-width: 700px) { .reference-dialog { padding: 15px; } .reference-dialog h2 { font-size: 17px; } .reference-dialog-heading { gap: 10px; margin-bottom: 13px; } .reference-image-frame { min-height: 200px; } .reference-image-frame img { max-height: calc(100dvh - 200px); } .result-actions .reference-control { font-size: 10px; } }
+@media (max-width: 700px) { .library-section .section-heading { align-items: flex-start; flex-wrap: wrap; } .library-actions { justify-content: flex-start; } .job-card { gap: 8px; } .job-select { gap: 10px; } .delete-dialog, .share-dialog { padding: 20px; } }

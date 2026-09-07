@@ -1,144 +1,34 @@
-# kimodo.cpp
+# models.xedoc.ru
 
-GGML/C++ implementation of NVIDIA's Kimodo text-to-motion model.
+Студия создания 3D-моделей и анимаций с вычислениями на локальном Windows-ПК. Репозиторий объединяет исходный редактор Kimodo/SMPL-X и новый режим Model Studio.
 
-This repository also contains the customized editor published at
-[models.xedoc.ru](https://models.xedoc.ru): 26 embedded preview characters,
-SMPL-X retargeting, camera follow, animated floor alignment, and a manual
-height adjustment.
+| Режим | Страница | Возможности |
+|---|---|---|
+| Анимация по тексту | [models.xedoc.ru](https://models.xedoc.ru/) | Kimodo SMPL-X RP v1, персонажи для предпросмотра, редактор движений |
+| Модель по картинке | [/generate-model](https://models.xedoc.ru/generate-model) | Pixal3D/ComfyUI, геометрия и текстуры GLB, генерация движения |
+| Playground | [/playground](https://models.xedoc.ru/playground) | Выравнивание, автоматический скелет, анимация и ragdoll в WebGL |
 
-## Public deployment
+Model Studio сохраняет положение и поворот модели, позволяет просмотреть исходный референс, удалять генерации и делиться ссылкой на результат. Получатель ссылки видит готовую модель и движения; исходная картинка и библиотека остаются приватными.
 
-The public domain terminates HTTPS on Nginx at `82.146.42.213`. The server is
-a small CPU-only VM, so it proxies the editor and generation API through an
-SSH reverse tunnel to the Windows/Vulkan workstation running the native
-Kimodo backend on `127.0.0.1:8094`.
+## Запуск и документация
 
-- Server configuration: `.deploy/nginx.conf`
-- Friendly offline page: `.deploy/offline.html`
-- Windows tunnel lifecycle: `.deploy/windows/`
-- Character and third-party notices: `demo/assets/avatars/LICENSES.md` and
-  `demo/assets/vendor/LICENSE.three.txt`
+- **[Model Studio: установка, запуск и использование](docs/model-studio.md)** — зависимости, `start.bat`, локальные пути, генерация, скелет, playground, общие ссылки и проверки.
+- **[Native Kimodo: сборка и API](docs/kimodo-native.md)** — сохранённая документация C++/GGML/Vulkan, веса и нативные тесты.
+- **[Implementation notes](docs/IMPLEMENTATION.md)** и **[PORTING.md](PORTING.md)** — устройство нативного backend.
 
-Model weights, generated motions, executables, logs, and local credentials are
-intentionally excluded from Git. The public editor is available only while the
-Windows backend and its reverse tunnel are running.
+На настроенном ПК `start.bat` запускает ComfyUI, Kimodo, Studio и туннели. После свежего клонирования сначала нужны внешние модели и инструменты, настройка путей и сборка интерфейса — подробности в руководстве Model Studio.
 
-## Status
+## Структура проекта
 
-`Kimodo-SMPLX-RP-v1` accepts either a UTF-8 prompt or a precomputed LLM2Vec
-embedding and generates unconstrained SMPL-X22 local rotations and root
-translations on CPU or Vulkan. The text encoder uses eight-layer Vulkan chunks
-by default; set `KIMODO_TEXT_LAYER_CHUNK=1..32` to tune VRAM use.
+- `apps/studio-web/` — интерфейс генерации и Three.js/Rapier playground.
+- `studio/`, `scripts/`, `config/pixal3d-api.json` — локальный API, очередь, Pixal3D, подготовка скелета, перенос движений и запускаторы.
+- `src/`, `include/`, `demo/`, `ggml/` — исходный Kimodo backend и редактор; GGML подключён как submodule.
+- `.deploy/` — актуальные Nginx/offline-конфигурации и существующие сценарии туннеля Kimodo. Nginx отправляет редактор на туннель `18094`, а Studio на `18095`.
+- `deploy/` — конфигурация Studio и разовый сценарий её первоначального подключения; `apply-nginx.sh` проверяет старый SHA256 и не служит универсальным обновлением.
+- `tests/` — нативные тесты Kimodo, API Studio и геометрия суставов.
 
-Included: checked GGUF loading, safetensors conversion, DDIM sampling, C/C++
-APIs, CPU/Vulkan parity tests, and a local text-to-motion demo. Constraints,
-SOMA, G1, GLB export, and quantised models are not implemented yet.
+Веса моделей, сгенерированные GLB, исходные пользовательские картинки, история, локальные отчёты, зависимости и настройки доступа не хранятся в Git. Демо Doom Slayer использует отдельный локальный `data/demo/doom-rigged.glb`. Доступ через сайт, включая общие ссылки, требует работающего ПК и туннелей.
 
-## Build and test on Linux
+## Лицензии
 
-Install a C++23 compiler, CMake 3.25+, Ninja, Python 3 with the Hugging Face
-CLI (`pip install huggingface_hub`), and the Vulkan loader/headers for Vulkan
-support. GGML is a pinned Git submodule:
-
-```sh
-git submodule update --init --recursive
-scripts/download_gguf_weights.sh --output "$PWD"
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
-```
-
-The standard test suite requires the local motion GGUF, text bundle, and
-fixtures. It never downloads weights by itself. `release`, `asan-ubsan`, and
-`fuzz` presets are also available.
-
-Nix is optional and provides these dependencies reproducibly:
-
-```sh
-nix develop path:. --command cmake --preset debug
-nix develop path:. --command cmake --build --preset debug
-```
-
-For sanitizer work:
-
-```sh
-nix develop path:. --command cmake --preset asan-ubsan
-nix develop path:. --command cmake --build --preset asan-ubsan
-nix develop path:. --command env \
-  LD_LIBRARY_PATH="$PWD/build/asan-ubsan/ggml/src:$PWD/build/asan-ubsan/ggml/src/ggml-vulkan:$LD_LIBRARY_PATH" \
-  ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1 \
-  ctest --preset asan-ubsan --output-on-failure
-```
-
-Leak detection is disabled because Vulkan loader/driver allocations are global
-to the process. The GGUF parser fuzzer requires Clang.
-
-## API
-
-`include/kimodo/kimodo_capi.h` is the C API. Model loading checks the motion
-GGUF and text bundle before inference. Use `kimodo_generate_embedding` for
-4096 F32 values or `kimodo_generate` for text. Both return SMPL-X22 root
-translations and local XYZW rotations.
-
-## Demo
-
-After building the debug preset and downloading the native GGUF bundle:
-
-```sh
-go run ./demo -addr 0.0.0.0:8094
-```
-
-Open `http://localhost:8094`. The left sidebar contains the prompt and a
-persistent history; choosing a previous animation restores its prompt for a
-new generation.
-
-## Weights
-
-Ready-to-run native GGML weights are published under the Hugging Face
-`LocalAI-io` organisation (not GitHub's `localai-org`). The reusable
-[Llama-3-Kimodo-GGML](https://huggingface.co/LocalAI-io/Llama-3-Kimodo-GGML)
-text encoder and the upstream-linked
-[Kimodo-SMPLX-RP-v1-GGML](https://huggingface.co/LocalAI-io/Kimodo-SMPLX-RP-v1-GGML)
-diffusion model are separate, so users download rather than recreate them:
-
-```sh
-scripts/download_gguf_weights.sh --output "$PWD"
-```
-
-The installer verifies each published manifest and SHA-256 hashes. Use
-`--motion-only` when supplying a precomputed 4096-float LLM2Vec embedding.
-
-The GGUF bundle includes converted Meta Llama 3 material and Kimodo is
-non-commercial research-only. Review the published model card and upstream
-licences before downloading or redistributing.
-
-### Regenerating the bundle
-
-This is only needed to reproduce a conversion. The SMPL-X checkpoint and Llama
-base model are gated. After accepting their Hugging Face licences and
-authenticating, download the exact revisions and hash manifests with:
-
-```sh
-nix develop path:. --command hf auth login
-nix develop path:. --command scripts/download_weights.sh \
-  --output "$PWD/models" --with-text
-```
-
-Convert the local LLM2Vec model to the native component bundle with:
-
-```sh
-nix develop path:. --command scripts/convert_llm2vec_bundle.sh \
-  "$PWD/models/llama3-8b-instruct-base" "$PWD/generated/llm2vec-text-bundle"
-```
-
-Validate a prospective release without network access, then explicitly upload
-it from an account allowed to publish to `LocalAI-io`:
-
-```sh
-nix develop path:. --command python scripts/publish_gguf.py --component motion
-nix develop path:. --command python scripts/publish_gguf.py --component motion \
-  --upload --confirm-upstream-licences
-nix develop path:. --command python scripts/publish_gguf.py --component text \
-  --upload --confirm-upstream-licences
-```
+Сохраняются исходные уведомления [NOTICE](NOTICE), [лицензии персонажей](demo/assets/avatars/LICENSES.md) и [Three.js](demo/assets/vendor/LICENSE.three.txt). Для используемых весов действуют условия их поставщиков; SMPL-X RP v1 предназначен для разрешённого его лицензией исследовательского использования. Веса через этот репозиторий не распространяются.

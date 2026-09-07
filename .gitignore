@@ -40,3 +40,25 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Local Model Studio runtime and private results
+node_modules/
+dist/
+data/
+.runtime/
+work/
+__pycache__/
+*.pyc
+.env
+config/local.json
+*.log
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.ckpt
+*.onnx
+*.task
+/deploy/nginx.before.conf
