@@ -3,6 +3,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { createRagdoll } from './ragdoll.js';
+import { createManualRigEditor } from './manual-rig-editor.js';
+import { createEnvironment } from './environment.js';
 
 const BONES = ['Hips', 'Spine', 'Chest', 'Neck', 'Head', 'UpperArm_L', 'LowerArm_L', 'Hand_L', 'UpperArm_R', 'LowerArm_R', 'Hand_R', 'UpperLeg_L', 'LowerLeg_L', 'Foot_L', 'UpperLeg_R', 'LowerLeg_R', 'Foot_R'];
 let physicsPromise;
@@ -44,7 +46,8 @@ export function createViewer({ container, playground = false, onState = () => {}
   scene.environmentIntensity = 0.48;
   room.dispose();
   pmrem.dispose();
-  scene.add(new THREE.HemisphereLight(0xb3d4e5, 0x202a35, 1.8));
+  const hemisphere = new THREE.HemisphereLight(0xb3d4e5, 0x202a35, 1.8);
+  scene.add(hemisphere);
   const key = new THREE.DirectionalLight(0xfff1d7, 3.2);
   key.position.set(-4, 7, 5);
   key.castShadow = true;
@@ -70,6 +73,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.008;
   scene.add(ring);
+  const stage = createEnvironment({ scene, renderer, camera, container, floor, grid, ring, key, rim, hemisphere });
 
   let disposed = false, request = 0, ready = false, world, RAPIER;
   let loading = false, loadedPercent = 0, loadError = null;
@@ -116,6 +120,10 @@ export function createViewer({ container, playground = false, onState = () => {}
     container.dataset.position = JSON.stringify(state.position);
     onState(state);
   };
+  const manualEditor = createManualRigEditor({
+    scene, camera, canvas, container, controls,
+    getModel: () => ready && sourceOrientation ? model : null,
+  });
 
   function disposeObject(root) {
     const textures = new Set(), materials = new Set(), geometries = new Set();
@@ -146,6 +154,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       disposeObject(model);
     }
     model = mixer = action = undefined;
+    manualEditor.refreshModel();
     clipName = '';
     patrol = false;
     orientationPreview = false;
@@ -178,13 +187,15 @@ export function createViewer({ container, playground = false, onState = () => {}
     }
   }
 
-  async function load(url, { allowRagdoll = false, animation = true, prepare = false, rotation = {}, position = {} } = {}) {
+  async function load(url, { allowRagdoll = false, animation = true, prepare = false, rotation = {}, position = {}, environment: stageSettings } = {}) {
     const sequence = ++request;
     clearModel();
     placement.set(...['x', 'y', 'z'].map((axis) => Math.max(-5, Math.min(5, Number(position[axis]) || 0))));
     emit({ loading: true, loadedPercent: 0, error: null });
     let gltf;
     try {
+      if (stageSettings !== undefined) await stage.setEnvironment(stageSettings);
+      if (disposed || sequence !== request) return;
       gltf = await new GLTFLoader().loadAsync(url, (event) => {
         if (sequence === request) emit({ loading: true, loadedPercent: event.total ? Math.round(event.loaded / event.total * 100) : null });
       });
@@ -235,6 +246,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       }
       playing = true;
       ready = true;
+      manualEditor.refreshModel();
       resetCamera();
       emit({ loading: false, error: null });
     } catch (error) {
@@ -269,6 +281,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     basePosition.copy(model.position);
     baseQuaternion.copy(model.quaternion);
     container.dataset.rotation = JSON.stringify(previewRotation);
+    manualEditor.refreshModel();
     return true;
   }
 
@@ -289,6 +302,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     model.position.add(delta);
     basePosition.add(delta);
     model.updateMatrixWorld(true);
+    manualEditor.refreshModel();
     for (const entry of ragdoll?.bodyEntries || []) {
       const translated = new THREE.Vector3().copy(entry.body.translation()).add(delta);
       entry.body.setTranslation(translated, true);
@@ -332,7 +346,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   }
 
   function hit(point) {
-    if (!ready || !ragdoll) return false;
+    if (!ready || !ragdoll || manualEditor.enabled) return false;
     const center = point?.clone() ?? model.getObjectByName('Chest').getWorldPosition(new THREE.Vector3());
     const direction = center.clone().sub(camera.position);
     direction.y = 0;
@@ -355,7 +369,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   let pointerStart;
   function pointerDown(event) { pointerStart = { x: event.clientX, y: event.clientY, time: performance.now() }; }
   function pointerUp(event) {
-    if (!playground || !pointerStart || !ready || !ragdoll || event.button !== 0) return;
+    if (manualEditor.enabled || !playground || !pointerStart || !ready || !ragdoll || event.button !== 0) return;
     if (Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5 || performance.now() - pointerStart.time > 500) return;
     const rect = canvas.getBoundingClientRect();
     pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
@@ -372,6 +386,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    stage.resize();
   };
   const observer = new ResizeObserver(resize);
   observer.observe(container);
@@ -389,7 +404,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     const dt = realDt * (slow ? 0.2 : 1);
     accumulator = Math.min(accumulator + dt, 0.1);
     while (accumulator >= STEP) {
-      if (ready && !ragdoll?.enabled && playing) {
+      if (ready && !ragdoll?.enabled && playing && !manualEditor.enabled) {
         animationTime += STEP;
         if (patrol) {
           const angle = animationTime * 0.29;
@@ -414,7 +429,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       particle.mesh.material.opacity = Math.min(1, particle.life * 4);
       if (particle.life <= 0) { particle.mesh.removeFromParent(); disposeObject(particle.mesh); particles.splice(i, 1); }
     }
-    if (playground && ready && !orientationPreview && model.getObjectByName('Hips')) {
+    if (playground && ready && !orientationPreview && !manualEditor.enabled && model.getObjectByName('Hips')) {
       const target = model.getObjectByName('Hips').getWorldPosition(new THREE.Vector3());
       target.y = Math.max(0.55, Math.min(1.1, target.y));
       controls.target.lerp(target, 1 - Math.exp(-realDt * 1.2));
@@ -429,6 +444,9 @@ export function createViewer({ container, playground = false, onState = () => {}
   });
   return {
     load, hit, reset, resetCamera, frontView, setPosition, placeOnFloor,
+    setEnvironment: stage.setEnvironment,
+    setManualRig(options) { manualEditor.setState(options); },
+    manualView(direction) { return manualEditor.view(direction); },
     capturePreview() {
       if (!ready || disposed || !canvas.width || !canvas.height) return null;
       renderer.render(scene, camera);
@@ -440,7 +458,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       preview.getContext('2d').drawImage(canvas, 0, 0, preview.width, preview.height);
       return preview.toDataURL('image/webp', 0.86);
     },
-    setOrientation(rotation) { const changed = applyPreviewRotation(rotation); if (changed) emit(); return changed; },
+    setOrientation(rotation) { if (manualEditor.enabled) return false; const changed = applyPreviewRotation(rotation); if (changed) emit(); return changed; },
     setPower(value) { power = Math.max(1, Math.min(10, Number(value))); },
     setSlow(value) { slow = Boolean(value); emit(); },
     setPlaying(value) { playing = Boolean(value); emit(); },
@@ -451,11 +469,13 @@ export function createViewer({ container, playground = false, onState = () => {}
       request++;
       renderer.setAnimationLoop(null);
       clearModel();
+      manualEditor.dispose();
       observer.disconnect();
       canvas.removeEventListener('pointerdown', pointerDown);
       canvas.removeEventListener('pointerup', pointerUp);
       controls.dispose();
       world?.free();
+      stage.dispose();
       disposeObject(scene);
       environment.dispose();
       renderer.dispose();

@@ -581,7 +581,7 @@ async function mountModelPage(page, id) {
       } });
       page.querySelector('[data-reset-camera]').addEventListener('click', () => viewer.frontView());
       window.addEventListener('pagehide', () => viewer.dispose(), { once: true });
-      await viewer.load(artifact.url, { rotation: artifact.rotation, position: job.placement || {}, allowRagdoll: false });
+      await viewer.load(artifact.url, { rotation: artifact.rotation, position: job.placement || {}, environment: job.environment || {}, allowRagdoll: false });
       viewer.frontView();
     } catch { loading.hidden = true; error.textContent = '3D-просмотр недоступен. Можно открыть playground или скачать модель.'; error.hidden = false; }
   } catch (error) {

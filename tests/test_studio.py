@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import uuid
 import secrets
+import copy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,17 @@ spec = importlib.util.spec_from_file_location("studio_under_test", Path(__file__
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 ORIGINAL_WAIT_IDLE = server.Studio.wait_idle
+
+
+def manual_fixture():
+    points = {'head': [0, 1.85, 0.03], 'neck': [0, 1.67, 0]}
+    for side, sign in (('l', 1), ('r', -1)):
+        for name, point in {'shoulder': [.24, 1.58, 0], 'elbow': [.43, 1.27, 0],
+                            'wrist': [.24, 1.08, .12], 'hand': [.15, 1.04, .13],
+                            'hip': [.14, .99, 0], 'knee': [.2, .56, .02],
+                            'ankle': [.22, .14, 0], 'toe': [.23, .06, .18]}.items():
+            points[f'{name}_{side}'] = [point[0] * sign, *point[1:]]
+    return {'version': 1, 'points': points}
 
 
 def small_glb(rigged=False):
@@ -623,6 +635,133 @@ class StudioHTTPTests(unittest.IsolatedAsyncioTestCase):
         public = await (await self.client.get(f"/api/model-studio/jobs/{job['id']}")).json()
         self.assertNotIn('_path', public['rig'])
         self.assertNotIn('_rigVersions', public)
+
+    async def test_manual_rig_uses_persisted_points_without_new_geometry_or_pose_detection(self):
+        job = await self.create()
+        manual, rotation = manual_fixture(), {'x': -10, 'y': 0, 'z': 0}
+        calls = []
+        async def rig(script, args, output_dir, timeout=900):
+            points_file = args[args.index('--manual-points') + 1]
+            calls.append(json.loads(points_file.read_text(encoding='utf-8')))
+            self.assertEqual(points_file.parent, output_dir)
+            await self.fake_rig(script, args, output_dir)
+        self.studio.run_blender = rig
+        response = await self.client.post(f"/api/model-studio/jobs/{job['id']}/rig", json={'rotation': rotation, 'manual': manual})
+        self.assertEqual(response.status, 202, await response.text())
+        await asyncio.wait_for(self.studio.rig_queue.join(), 10)
+        saved = self.studio.jobs[job['id']]
+        self.assertEqual(calls, [manual])
+        self.assertEqual(saved['rig']['method'], 'manual-landmarks')
+        self.assertEqual(saved['rig']['manual'], manual)
+        self.assertEqual(saved['rig']['manualRotation'], rotation)
+        self.assertEqual(saved['_manualRigDraft']['manual'], manual)
+        self.assertEqual(FakePipeline.submissions, 1)
+        persisted = json.loads((server.JOB_ROOT / job['id'] / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual(persisted['rig']['manual'], manual)
+
+    async def test_manual_draft_is_owner_only_partial_private_and_survives_restart(self):
+        job = await self.create()
+        endpoint = f"/api/model-studio/jobs/{job['id']}"
+        data = {'rotation': {'x': -10, 'y': 0, 'z': 0}, 'manual': {'version': 1, 'points': {'head': [0, 1.85, .03]}}}
+        response = await self.client.put(endpoint + '/rig-draft', json=data)
+        self.assertEqual(response.status, 200, await response.text())
+        public = await response.json()
+        self.assertEqual(public['manualRigDraft']['manual'], data['manual'])
+        self.assertNotIn('_manualRigDraft', public)
+        self.assertEqual(public['rig']['status'], 'not_requested')
+        token = (await (await self.client.post(endpoint + '/share')).json())['token']
+        async with self.outsider.get(self.client.make_url('/api/model-studio/shares/' + token)) as response:
+            self.assertNotIn('manualRigDraft', await response.text())
+        async with self.outsider.put(self.client.make_url(endpoint + '/rig-draft'), json=data) as response:
+            self.assertEqual(response.status, 404)
+        self.assertEqual((await self.client.put(endpoint + '/rig-draft', json=data, headers={'Origin': 'https://evil.example'})).status, 403)
+        session = self.client.session.cookie_jar.filter_cookies(self.client.make_url('/'))['model_studio_session'].value
+        await self.client.close()
+        self.app = server.create_app()
+        self.client = TestClient(TestServer(self.app), cookie_jar=aiohttp.CookieJar(unsafe=True))
+        await self.client.start_server()
+        self.client.session.cookie_jar.update_cookies({'model_studio_session': session}, response_url=self.client.make_url('/'))
+        self.studio = self.app['studio']
+        reopened = await (await self.client.get(endpoint)).json()
+        self.assertEqual(reopened['manualRigDraft']['manual'], data['manual'])
+        self.assertEqual(FakePipeline.submissions, 1)
+
+    async def test_manual_bad_points_and_degenerate_bones_never_queue_work(self):
+        job = await self.create()
+        rotation = {'x': 0, 'y': 0, 'z': 0}
+        examples = [{'version': 1, 'points': {}}, {'version': True, 'points': {}}, manual_fixture(), manual_fixture()]
+        examples[2]['points']['head'][0] = True
+        examples[3]['points']['wrist_l'] = examples[3]['points']['elbow_l']
+        for manual in examples:
+            self.studio.rates.clear()
+            response = await self.client.post(f"/api/model-studio/jobs/{job['id']}/rig", json={'rotation': rotation, 'manual': manual})
+            self.assertEqual(response.status, 400, await response.text())
+        self.assertTrue(self.studio.rig_queue.empty())
+        self.assertEqual(self.studio.jobs[job['id']]['rig']['status'], 'not_requested')
+
+    async def test_manual_draft_stale_writes_and_failed_save_are_retryable(self):
+        job = await self.create()
+        endpoint = f"/api/model-studio/jobs/{job['id']}/rig-draft"
+        data = {'rotation': {'x': 0, 'y': 0, 'z': 0}, 'manual': {'version': 1, 'points': {}},
+                'write': {'clientId': str(uuid.uuid4()), 'revision': 1}}
+        self.assertEqual((await self.client.put(endpoint, json=data)).status, 200)
+        changed = copy.deepcopy(data)
+        changed['write']['revision'] = 2
+        changed['manual']['points']['head'] = [0, 1.85, .03]
+        with patch.object(self.studio, 'save', side_effect=OSError('Disk full')):
+            self.assertEqual((await self.client.put(endpoint, json=changed)).status, 503)
+        self.assertEqual(self.studio.jobs[job['id']]['_manualRigDraft']['manual']['points'], {})
+        self.assertEqual((await self.client.put(endpoint, json=changed)).status, 200)
+        response = await self.client.put(endpoint, json=data)
+        self.assertEqual((await response.json())['manualRigDraft']['manual'], changed['manual'])
+
+    async def test_failed_manual_rerig_keeps_previous_manual_rig_and_auto_can_replace_it(self):
+        job = await self.create()
+        endpoint = f"/api/model-studio/jobs/{job['id']}/rig"
+        first = {'rotation': {'x': 0, 'y': 0, 'z': 0}, 'manual': manual_fixture()}
+        self.studio.run_blender = self.fake_rig
+        self.assertEqual((await self.client.post(endpoint, json=first)).status, 202)
+        await self.studio.rig_queue.join()
+        saved = self.studio.jobs[job['id']]
+        old_revision, old_url = saved['rig']['revision'], saved['artifacts']['riggedUrl']
+        changed = copy.deepcopy(first)
+        changed['manual']['points']['head'][1] = 1.9
+        async def fail(*args, **kwargs):
+            raise RuntimeError('Weighting failed')
+        self.studio.run_blender = fail
+        self.assertEqual((await self.client.post(endpoint, json=changed)).status, 202)
+        await self.studio.rig_queue.join()
+        self.assertEqual(saved['rig']['manual'], first['manual'])
+        self.assertEqual(saved['rig']['revision'], old_revision)
+        self.assertEqual(saved['artifacts']['riggedUrl'], old_url)
+        self.assertEqual(saved['_manualRigDraft']['manual'], changed['manual'])
+        async def auto(script, args, output_dir, timeout=900):
+            self.assertNotIn('--manual-points', args)
+            await self.fake_rig(script, args, output_dir)
+        self.studio.run_blender = auto
+        await self.rig(job)
+        self.assertNotIn('manual', saved['rig'])
+        self.assertNotIn('_manualInput', saved['rig'])
+
+    async def test_manual_rig_restart_reuses_snapshot_in_fresh_directory(self):
+        job = await self.create()
+        saved = self.studio.jobs[job['id']]
+        saved['rig'].update(status='running', operationId='manual-restart', rotation={'x': -10, 'y': 0, 'z': 0},
+                            mode='manual', _manualInput=manual_fixture())
+        self.studio.save(saved)
+        await self.client.close()
+        observed = []
+        async def rig(studio, script, args, output_dir, timeout=900):
+            observed.append(json.loads(args[args.index('--manual-points') + 1].read_text(encoding='utf-8')))
+            await self.fake_rig(script, args, output_dir)
+        with patch.object(server.Studio, 'run_blender', rig):
+            self.app = server.create_app()
+            self.client = TestClient(TestServer(self.app), cookie_jar=aiohttp.CookieJar(unsafe=True))
+            await self.client.start_server()
+            self.studio = self.app['studio']
+            await asyncio.wait_for(self.studio.rig_queue.join(), 10)
+        self.assertEqual(observed, [manual_fixture()])
+        self.assertEqual(self.studio.jobs[job['id']]['rig']['method'], 'manual-landmarks')
 
     async def test_rig_rotation_rejects_nonfinite_and_non_numeric_values(self):
         job = await self.create()

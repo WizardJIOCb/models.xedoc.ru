@@ -3,6 +3,8 @@ import './placement.css';
 import './library-actions.css';
 import './community-integration.css';
 import { mountCommunityHeader, mountGallerySection, renderPublicationPanel } from './community.js';
+import { renderEnvironmentPanel, getEnvironmentPreview, saveEnvironmentPanel } from './environment-panel.js';
+import { manualRigMarkup, createManualRigPanel } from './manual-rig-panel.js';
 
 const API = '/api/model-studio';
 const settingsClientId = crypto.randomUUID();
@@ -111,6 +113,23 @@ $('app').innerHTML = `
   </dialog>
 `;
 
+const manualRigPanel = isPlayground && !isShared ? createManualRigPanel({
+  getJob, getViewer: () => state.viewer, getRotation: (job) => placementDraft(job).rotation,
+  request, repaint: renderRigPreparation,
+  restoreRotation: (rotation) => {
+    const job = getJob();
+    if (!job || rigBusy(job)) return;
+    const settings = placementDraft(job);
+    settings.rotation = { ...rotation };
+    settings.version++; settings.dirty = true; settings.error = null;
+    rigDraft(job).rotation = { ...rotation };
+    queuePlacementSave(job, settings);
+    syncRotationControls(rotation);
+    state.viewer?.setOrientation(rotation);
+    renderRigPreparation();
+  },
+}) : null;
+
 function viewerMarkup() {
   return `<div class="viewer-frame" id="viewer-frame">
     <div id="viewer" class="viewer-canvas"></div>
@@ -161,6 +180,7 @@ function generationMarkup() {
         <div class="job-progress" id="job-progress" hidden><div class="progress-top"><span class="small-loader"></span><strong id="job-stage"></strong><span id="job-percent"></span></div><div class="progress-track"><span id="job-progress-fill"></span></div><p id="job-progress-note">Можно закрыть страницу: задача продолжит выполняться на компьютере.</p></div>
         <div class="result-error" id="result-error" role="alert" hidden><strong>Не удалось создать модель</strong><p id="result-error-message"></p><button class="button button-secondary button-small" id="retry-generation">Попробовать с теми же настройками</button></div>
         <div class="result-actions" id="result-actions" hidden><a class="button button-secondary" id="download-model" download>${icon('download')}<span>Скачать GLB</span></a><a class="button button-primary" id="open-playground" href="/playground">${icon('play')}В playground</a><button class="button button-quiet reference-control" id="view-reference" type="button" hidden>${icon('image')}Посмотреть референс</button><button class="icon-button" id="share-model" title="Поделиться моделью" aria-label="Поделиться моделью" hidden>${icon('share')}</button><button class="icon-button" id="reset-camera" title="Вернуть камеру" aria-label="Вернуть камеру">${icon('reset')}</button></div>
+        <div id="environment-panel" hidden></div>
         <div id="publication-panel" hidden></div>
       </div>
       <section class="panel animation-panel" id="animation-panel" aria-labelledby="animation-title">
@@ -188,6 +208,7 @@ function playgroundMarkup() {
       <div class="playground-content"><div class="selected-model-name" id="playground-model-name">Модель не выбрана</div><p class="field-hint" id="playground-hint">Открой свою модель из библиотеки ниже или начни с демо.</p>
         ${rigPreparationMarkup()}
         ${placementMarkup()}
+        <div id="environment-panel" hidden></div>
         <label class="field-label" for="playground-motion">Движение</label><select id="playground-motion" disabled><option value="">Исходная модель</option></select>
         <div class="arena-buttons"><button class="button button-primary" id="strike" disabled>${icon('zap')}Нанести удар<kbd>Space</kbd></button><button class="button button-secondary" id="reset" disabled>${icon('reset')}Восстановить<kbd>R</kbd></button></div>
         <label class="range-heading" for="power">Сила удара <output id="power-value">5 / 10</output></label><input id="power" type="range" min="1" max="10" value="5" disabled />
@@ -225,6 +246,7 @@ function rigPreparationMarkup() {
     <p class="field-hint" id="rig-preparation-hint">Поставь модель на ноги, лицом к виду «Спереди». Поворот меняет модель, а перетаскивание — камеру.</p>
     <button class="button button-quiet button-small full-width" id="edit-rig" type="button">${icon('reset')}Настроить заново</button>
     <form id="rig-form" hidden>
+      ${manualRigMarkup()}
       <div class="rig-view-actions"><button class="button button-quiet button-small" id="rig-front-view" type="button">Вид спереди</button><button class="button button-quiet button-small" id="rig-reset-rotation" type="button">Сбросить углы</button></div>
       <fieldset id="rig-rotation-fields"><legend class="sr-only">Поворот модели в градусах</legend>
       ${['x', 'y', 'z'].map((axis) => `<div class="rig-axis-row"><label class="rig-axis-label" for="rotation-${axis}">${axis.toUpperCase()}</label><input id="rotation-${axis}" data-rotation-range="${axis}" type="range" min="-180" max="180" step="1" value="0" aria-label="Поворот ${axis.toUpperCase()}, градусы" /><input id="rotation-${axis}-number" data-rotation-number="${axis}" type="number" min="-180" max="180" step="1" value="0" aria-label="Угол ${axis.toUpperCase()}, градусы" required /><button type="button" class="rig-quarter-turn" data-rotation-step="${axis}" aria-label="Повернуть по ${axis.toUpperCase()} на 90 градусов">+90°</button></div>`).join('')}
@@ -376,7 +398,7 @@ function renderPlacement() {
   const job = getJob();
   const visible = !state.demo && job?.status === 'complete' && Boolean(artifactUrl(job));
   $('placement-panel').hidden = !visible;
-  if (!visible) return;
+  if (!visible) { manualRigPanel?.render(null); return; }
   const draft = placementDraft(job);
   $('placement-fields').disabled = isShared || !state.viewerState.ready;
   $('placement-hint').textContent = isShared ? 'Положение и поворот сохранены владельцем. Здесь доступен просмотр.' : 'Сдвиг по сцене, в метрах. Y — высота над полом. Положение и поворот сохраняются автоматически.';
@@ -505,20 +527,24 @@ function renderRigPreparation() {
   const failed = !busy && job.rig?.status === 'failed';
   const retainedRig = failed && hasRig(job);
   const motionBusy = job.motions?.some((motion) => ['queued', 'running'].includes(motion.status));
+  const manual = manualRigPanel?.render(job, { editing, busy: busy || Boolean(motionBusy), ready: Boolean(state.viewerState.ready && state.viewerState.orientationPreview) });
   $('rig-status-label').textContent = busy ? 'Подготовка' : failed ? 'Ошибка подготовки' : hasRig(job) ? 'Скелет готов' : 'Без скелета';
   const preparationHint = editing ? 'Поставь модель на ноги, лицом к виду «Спереди». Поворот сохраняется вместе с положением; перетаскивание меняет камеру.' : 'Можно выровнять исходную модель и заново создать скелет. Сохранённые движения останутся в библиотеке.';
   $('rig-preparation-hint').textContent = retainedRig ? `Последняя попытка не удалась. Предыдущий скелет сохранён. ${preparationHint}` : preparationHint;
+  if (manual?.manual) $('rig-preparation-hint').textContent = 'Расставь опорные точки внутри тела и проверь глубину сбоку. Поворот модели зафиксирован на время разметки.';
   $('edit-rig').hidden = editing;
   $('edit-rig').disabled = busy;
   $('rig-form').hidden = !editing;
-  $('rig-rotation-fields').disabled = busy;
-  $('rig-reset-rotation').disabled = busy;
+  $('rig-rotation-fields').disabled = busy || Boolean(manual?.manual);
+  $('rig-rotation-fields').hidden = Boolean(manual?.manual);
+  $('rig-reset-rotation').disabled = busy || Boolean(manual?.manual);
+  $('rig-front-view').parentElement.hidden = Boolean(manual?.manual);
   $('rig-front-view').disabled = !state.viewerState.ready || !state.viewerState.orientationPreview;
   $('cancel-rig-edit').hidden = !hasRig(job);
   $('cancel-rig-edit').disabled = busy;
   $('cancel-rig-edit').textContent = retainedRig ? 'Вернуться к прежнему скелету' : 'Вернуться к готовому персонажу';
-  $('create-rig').disabled = busy || Boolean(motionBusy) || !state.health?.online || state.healthFailures >= 3 || !state.viewerState.ready || !state.viewerState.orientationPreview;
-  $('create-rig').querySelector('span:not(.icon)').textContent = state.rigSubmittingId === job.id ? 'Отправляем…' : busy ? 'Создаём скелет…' : 'Создать скелет';
+  $('create-rig').disabled = busy || Boolean(motionBusy) || !state.health?.online || state.healthFailures >= 3 || !state.viewerState.ready || !state.viewerState.orientationPreview || Boolean(manual?.manual && !manual.complete);
+  $('create-rig').querySelector('span:not(.icon)').textContent = state.rigSubmittingId === job.id ? 'Отправляем…' : busy ? 'Создаём скелет…' : manual?.manual ? 'Создать скелет по точкам' : 'Создать скелет';
   $('create-rig').title = motionBusy ? 'Дождись завершения текущего движения.' : '';
   $('rig-progress').hidden = !busy;
   if (busy) {
@@ -526,7 +552,7 @@ function renderRigPreparation() {
     $('rig-percent').textContent = `${jobProgress(job.rig)}%`;
     $('rig-progress-fill').style.width = `${jobProgress(job.rig)}%`;
   }
-  setError('rig-error', draft.error || (job.rig?.status === 'failed' ? rigErrorText(job.rig.error) : null));
+  setError('rig-error', draft.error || (job.rig?.status === 'failed' && (!manual?.manual || job.rig?.requestedMethod === 'manual') ? rigErrorText(job.rig.error) : null));
   // Polls update status only. Draft fields, selection and partially typed numbers
   // stay untouched while the user is choosing an orientation.
   if ($('rig-form').dataset.jobId !== job.id) {
@@ -582,8 +608,10 @@ async function submitRig(event) {
   renderRigPreparation();
   try {
     await flushModelSettings(job.id);
+    const manual = manualRigPanel?.manual(job) ? manualRigPanel.payload(job) : null;
+    if (manual) await manualRigPanel.flush(job);
     const result = await request(`/jobs/${encodeURIComponent(job.id)}/rig`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rotation: draft.rotation }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rotation: draft.rotation, ...(manual ? { manual } : {}) }),
     });
     const updated = result.job || result;
     state.jobs = state.jobs.map((item) => item.id === job.id ? updated : item);
@@ -762,6 +790,7 @@ async function shareModel() {
   sharedJobId = job.id;
   setError('share-error', null);
   try {
+    await saveEnvironmentPanel($('environment-panel'));
     await flushModelSettings(job.id);
     const result = await request(`/jobs/${encodeURIComponent(job.id)}/share`, { method: 'POST' });
     const link = new URL(result.url, location.origin);
@@ -841,7 +870,13 @@ async function loadSelectedViewer(force = false) {
   const key = `${url}:${state.demo || hasRig(job)}:${prepare}`;
   const position = placementDraft(job)?.position || { x: 0, y: 0, z: 0 };
   const rotation = sourceView(job) ? placementDraft(job).rotation : {};
-  if (!force && state.viewerKey === key) { state.viewer?.setPosition(position); state.viewer?.setOrientation(rotation); return; }
+  const environment = getEnvironmentPreview($('environment-panel'), job?.id) || job?.environment || {};
+  if (!force && state.viewerKey === key) {
+    state.viewer?.setPosition(position);
+    state.viewer?.setOrientation(rotation);
+    void state.viewer?.setEnvironment(environment).catch((error) => toast(error.message));
+    return;
+  }
   const requestId = ++state.viewerRequest;
   state.viewerKey = key;
   $('viewer-error').hidden = true;
@@ -851,7 +886,9 @@ async function loadSelectedViewer(force = false) {
   try {
     const viewer = await ensureViewer();
     if (requestId !== state.viewerRequest) return;
-    await viewer.load(url, { allowRagdoll: !prepare && !sourceView(job) && (state.demo || hasRig(job)), prepare, rotation, position });
+    const latestEnvironment = getEnvironmentPreview($('environment-panel'), job?.id) || job?.environment || {};
+    state.viewerLoadPromise = viewer.load(url, { allowRagdoll: !prepare && !sourceView(job) && (state.demo || hasRig(job)), prepare, rotation, position, environment: latestEnvironment });
+    await state.viewerLoadPromise;
     if (requestId !== state.viewerRequest) return;
     state.slow = false;
     state.debug = false;
@@ -862,6 +899,7 @@ async function loadSelectedViewer(force = false) {
     viewer.setOrientation(sourceView(job) ? placementDraft(job).rotation : {});
     // Source models open with the same camera on owner and shared playgrounds.
     if (isPlayground && sourceView(job)) viewer.frontView();
+    renderRigPreparation();
     if (isPlayground) ['slow', 'physics', 'pause'].forEach((id) => $(id).setAttribute('aria-pressed', 'false'));
     if (!isShared && !state.demo && job?.status === 'complete' && !job.previewUrl) void saveModelPreview(job, requestId);
   } catch (error) {
@@ -910,6 +948,16 @@ function renderSelection() {
   state.selectionSignature = signature;
   $('view-reference').hidden = !canViewReference(job);
   $('share-model').hidden = isShared || state.demo || job?.status !== 'complete' || !artifactUrl(job);
+  renderEnvironmentPanel($('environment-panel'), !isShared && !state.demo ? job : null, {
+    onPreview: async (environment) => {
+      if (getJob()?.id === job?.id) await state.viewer?.setEnvironment(environment);
+    },
+    onSaved: receiveOwnerJob,
+    capturePreview: async () => {
+      await state.viewerLoadPromise?.catch(() => {});
+      return getJob()?.id === job?.id ? state.viewer?.capturePreview() : null;
+    },
+  });
   renderPublicationPanel($('publication-panel'), !isShared && !state.demo ? job : null, {
     onUpdated: receiveOwnerJob, capturePreview: async () => state.viewer?.capturePreview() || null,
   });
@@ -1280,6 +1328,7 @@ window.addEventListener('pagehide', () => { state.viewer?.dispose(); if (state.f
 window.addEventListener('community:auth-changed', () => {
   if (isShared) return;
   state.authRevision++;
+  manualRigPanel?.reset();
   for (const draft of state.placementDrafts.values()) clearTimeout(draft.timer);
   state.placementDrafts.clear();
   state.rigDrafts.clear();

@@ -28,7 +28,7 @@ function harness() {
     $: (id) => { if (!elements.has(id)) elements.set(id, { shown: false, showModal() { this.shown = true; } }); return elements.get(id); },
     request(url, options = {}) { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; });
       requests.push({ url, options, resolve, reject }); return promise; },
-    renderPlacement() {}, setError() {}, toast(message) { notices.push(message); },
+    renderPlacement() {}, setError() {}, async saveEnvironmentPanel() {}, toast(message) { notices.push(message); },
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout(id) { timers.delete(id); },
   });
   vm.runInContext(code, context);
@@ -43,6 +43,32 @@ function harness() {
 }
 
 const tests = [];
+{
+  const h = harness();
+  let finishEnvironment;
+  h.context.saveEnvironmentPanel = () => new Promise((resolve) => { finishEnvironment = resolve; });
+  const sharing = h.context.shareModel();
+  await tick();
+  assert.equal(h.requests.length, 0, 'Share must wait until uploaded environment settings are saved');
+  finishEnvironment();
+  await tick();
+  assert.equal(h.requests.length, 1);
+  assert(h.requests[0].url.endsWith('/share'));
+  h.requests[0].resolve({ url: '/playground?share=opaque' });
+  await sharing;
+  assert.equal(h.elements.get('share-dialog').shown, true);
+  tests.push({ case: 'share_waits_for_environment_save', passed: true });
+}
+{
+  const h = harness();
+  h.context.saveEnvironmentPanel = async () => { throw new Error('Environment conflict'); };
+  await h.context.shareModel();
+  assert.equal(h.requests.length, 0, 'An unsaved environment must not produce a share link');
+  assert(h.notices.includes('Environment conflict'));
+  assert.equal(h.state.sharing, false);
+  assert.notEqual(h.elements.get('share-dialog')?.shown, true);
+  tests.push({ case: 'environment_save_failure_blocks_share', passed: true });
+}
 {
   const h = harness();
   h.edit({ x: -17 }, .2);

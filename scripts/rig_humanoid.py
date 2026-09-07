@@ -17,6 +17,7 @@ from mathutils import Quaternion, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pose_rig import fit_posed
+from manual_rig import fit_manual
 
 
 def split_slice(points, triangles, z, pieces):
@@ -336,11 +337,14 @@ def run(args):
         vertex.co = point_value
     mesh.data.calc_loop_triangles()
     triangle_indices = np.array([triangle.vertices[:] for triangle in mesh.data.loop_triangles])
-    try:
-        spec, diagnostics = fit_skeleton(points, points[triangle_indices])
-    except ValueError as geometric_error:
-        spec, diagnostics = fit_posed(mesh, points, output)
-        diagnostics['geometric_fallback_reason'] = str(geometric_error)
+    if args.manual_points:
+        spec, diagnostics = fit_manual(json.loads(args.manual_points.read_text(encoding='utf-8')))
+    else:
+        try:
+            spec, diagnostics = fit_skeleton(points, points[triangle_indices])
+        except ValueError as geometric_error:
+            spec, diagnostics = fit_posed(mesh, points, output)
+            diagnostics['geometric_fallback_reason'] = str(geometric_error)
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.mesh.select_all(action="SELECT")
     bpy.ops.mesh.remove_doubles(threshold=0.000001)
@@ -374,7 +378,7 @@ def run(args):
             bone.parent = data.edit_bones[parent]
             bone.use_connect = (bone.head - bone.parent.tail).length < 1e-5
     bpy.ops.object.mode_set(mode="OBJECT")
-    if diagnostics.get('automatic_semantic_recognition'):
+    if diagnostics.get('automatic_semantic_recognition') or diagnostics.get('manual_landmarks'):
         try:
             counts = make_heat_weights(mesh, rig, spec)
             diagnostics['weight_method'] = 'Blender bone heat; strongest 4 normalized influences'
@@ -414,7 +418,7 @@ def run(args):
         "bones": [{"name": name, "parent": parent, "head": gltf(head), "tail": gltf(tail),
                    "length": float(np.linalg.norm(tail-head))} for name, (head, tail, parent) in spec.items()]}
     report = {"status": "complete", "rigged": True,
-        "method": "posed-landmarks" if diagnostics.get('automatic_semantic_recognition') else "humanoid-template",
+        "method": "manual-landmarks" if diagnostics.get('manual_landmarks') else "posed-landmarks" if diagnostics.get('automatic_semantic_recognition') else "humanoid-template",
         "rotation": {"x": args.rotation_x, "y": args.rotation_y, "z": args.rotation_z},
         "diagnostics": diagnostics, "triangles": len(mesh.data.loop_triangles), "vertices": len(mesh.data.vertices),
         "bones": 17, "bone_weighted_vertices": counts, "animation_clips": clips, "glb_bytes": len(raw),
@@ -434,6 +438,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--triangles", type=int, default=50000)
+    parser.add_argument("--manual-points", type=Path)
     parser.add_argument("--facing", choices=("front", "back"), default="front")
     for axis in 'xyz':
         parser.add_argument(f'--rotation-{axis}', type=float, default=0)

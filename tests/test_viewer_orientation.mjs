@@ -48,6 +48,7 @@ function fixture(skinned = false) {
     const playground=false;
     const camera=new THREE.Object3D(), initialCamera=new THREE.Vector3(3,2,5);
     const controls={target:new THREE.Vector3(),update(){}};
+    const manualEditor={refreshModel(){},enabled:false};
     const emit=()=>{}, disposeObject=()=>{}, ensurePhysics=async()=>{};
     const clearModel=()=>{ready=false;model=undefined;sourceOrientation=false;orientationPreview=false;};
     const GLTFLoader=class{async loadAsync(){return gltf;}};

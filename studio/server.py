@@ -25,7 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'studio'))
 from pixal_pipeline import ComfyPipeline, glb_summary
+from manual_rig import validate_manual
 from community import Community
+from environment import Environment, payload as environment_payload, texture_paths as environment_texture_paths
 
 LOG = logging.getLogger('model-studio')
 DATA = ROOT / 'data'
@@ -78,6 +80,7 @@ class Studio:
         self.legacy_tasks = set()
         self.rates = {}
         self.community = Community(self, DATA, JOB_ROOT)
+        self.environment = Environment(self, JOB_ROOT)
 
     def save(self, job):
         job['updatedAt'] = now()
@@ -91,8 +94,11 @@ class Studio:
                 return [clean(v) for v in value]
             return value
         result = clean(job)
+        if '_manualRigDraft' in job:
+            result['manualRigDraft'] = clean(job['_manualRigDraft'])
         if 'artifacts' in job and 'createdAt' in job:
             result.update(self.community.owner_fields(job, author_cache, model_counts))
+            result['environment'] = environment_payload(job, self.file_url(job, ''))
         return result
 
     def owned(self, request):
@@ -224,7 +230,7 @@ class Studio:
         self.save(job)
         if job['mode'] == 'humanoid':
             job.update(stage='Подготовка скелета и весов', progress=95)
-            job['rig'].update(status='queued', operationId=str(uuid.uuid4()), rotation={'x': 0, 'y': 0, 'z': 0})
+            job['rig'].update(status='queued', operationId=str(uuid.uuid4()), rotation={'x': 0, 'y': 0, 'z': 0}, requestedMethod='auto')
             self.save(job)
             async with self.rig_lock:
                 await self.rig_job(job, job['rig']['operationId'])
@@ -247,6 +253,12 @@ class Studio:
             args = ['--input', JOB_ROOT / job['id'] / 'model.glb', '--output-dir', directory]
             for axis in ('x', 'y', 'z'):
                 args.extend([f'--rotation-{axis}', rig['rotation'][axis]])
+            manual = rig.get('_manualInput')
+            if manual is not None:
+                manual = validate_manual(manual)
+                manual_file = directory / 'manual-points.json'
+                atomic_json(manual_file, manual)
+                args.extend(['--manual-points', manual_file])
             await self.run_blender('rig_humanoid.py', args, directory)
             report_file = directory / 'rig-report.json'
             report = json.loads(report_file.read_text(encoding='utf-8')) if report_file.exists() else {}
@@ -260,12 +272,20 @@ class Studio:
             previous_path = rig.get('_path', 'rig/rigged.glb')
             if rig.get('available') and (JOB_ROOT / job['id'] / previous_path).is_file() and not any(v['path'] == previous_path for v in versions):
                 versions.append({'revision': rig.get('revision', 'legacy'), 'path': previous_path,
-                                 'rotation': rig.get('appliedRotation', {'x': 0, 'y': 0, 'z': 0})})
+                                 'rotation': rig.get('appliedRotation', {'x': 0, 'y': 0, 'z': 0}),
+                                 **({'manual': rig['manual']} if rig.get('manual') else {})})
             rig.update(available=True, status='complete', stage='Скелет готов', progress=100,
                        revision=revision, appliedRotation=dict(rig['rotation']), _path=relative,
-                       method=report.get('method', 'humanoid-template'),
-                       limitations='Автоматический скелет человека; сложные позы могут требовать правки весов.')
-            versions.append({'revision': revision, 'path': relative, 'rotation': dict(rig['rotation'])})
+                       method='manual-landmarks' if manual is not None else report.get('method', 'humanoid-template'),
+                       limitations='Суставы расставлены вручную; веса рассчитаны автоматически и могут требовать правки.' if manual is not None else
+                       'Автоматический скелет человека; сложные позы могут требовать правки весов.')
+            if manual is not None:
+                rig.update(manual=manual, manualRotation=dict(rig['rotation']))
+            else:
+                rig.pop('manual', None)
+                rig.pop('manualRotation', None)
+            versions.append({'revision': revision, 'path': relative, 'rotation': dict(rig['rotation']),
+                             **({'manual': manual} if manual is not None else {})})
             job['artifacts']['riggedUrl'] = self.file_url(job, relative)
             job['rigStats'] = stats
         except Exception as exc:
@@ -524,21 +544,82 @@ class Studio:
         ready()
         data = await self.json_object(request)
         rotation = data.get('rotation')
-        if set(data) != {'rotation'} or not isinstance(rotation, dict) or set(rotation) != {'x', 'y', 'z'}:
+        if set(data) not in ({'rotation'}, {'rotation', 'manual'}) or not isinstance(rotation, dict) or set(rotation) != {'x', 'y', 'z'}:
             raise web.HTTPBadRequest(text='Нужен rotation с углами x, y, z в градусах.')
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not -180 <= value <= 180 or not math.isfinite(value) for value in rotation.values()):
             raise web.HTTPBadRequest(text='Углы x, y, z должны быть числами от −180 до 180 градусов.')
+        manual = None
+        if 'manual' in data:
+            try:
+                manual = validate_manual(data['manual'])
+            except ValueError as error:
+                raise web.HTTPBadRequest(text=str(error))
         if self.pending_count() >= 8:
             raise web.HTTPTooManyRequests(text='Очередь заполнена. Повторите позже.')
         if self.owned(request) is not job:
             raise web.HTTPNotFound(text='Модель удалена.')
         ready()  # Body reads yield: recheck before reserving the operation.
         operation_id = str(uuid.uuid4())
-        job['rig'].update(status='queued', stage='В очереди на построение скелета', progress=0,
-                          operationId=operation_id, rotation=dict(rotation), error=None)
-        self.save(job)
+        rig = {**job['rig'], 'status': 'queued', 'stage': 'В очереди на построение скелета', 'progress': 0,
+               'operationId': operation_id, 'rotation': dict(rotation), 'error': None,
+               'mode': 'manual' if manual is not None else 'auto',
+               'requestedMethod': 'manual' if manual is not None else 'auto'}
+        rig.pop('_manualInput', None)
+        candidate = {**job, 'rig': rig}
+        if manual is not None:
+            rig['_manualInput'] = manual
+            candidate['_manualRigDraft'] = {'rotation': dict(rotation), 'manual': manual, 'updatedAt': now()}
+        # Reserve only after durable persistence, so a failed save stays retryable.
+        self.save(candidate)
+        job.update(candidate)
         self.rig_queue.put_nowait((job['id'], operation_id))
         return web.json_response(self.public(job), status=202)
+
+    async def rig_draft(self, request):
+        job = self.owned(request)
+        data = await self.json_object(request)
+        rotation = data.get('rotation')
+        if not {'rotation', 'manual'} <= set(data) or set(data) - {'rotation', 'manual', 'write'}:
+            raise web.HTTPBadRequest(text='Нужны rotation и manual для сохранения разметки.')
+        if not isinstance(rotation, dict) or set(rotation) != {'x', 'y', 'z'} or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not -180 <= value <= 180
+            or not math.isfinite(value) for value in rotation.values()
+        ):
+            raise web.HTTPBadRequest(text='Углы x, y, z должны быть числами от −180 до 180 градусов.')
+        try:
+            manual = validate_manual(data['manual'], complete=False)
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error))
+        if 'write' in data:
+            write = data['write']
+            try:
+                if not isinstance(write, dict) or set(write) != {'clientId', 'revision'}:
+                    raise ValueError()
+                client_id, revision = write['clientId'], write['revision']
+                if not isinstance(client_id, str) or len(client_id) != 36 or str(uuid.UUID(client_id)) != client_id.lower():
+                    raise ValueError()
+                if type(revision) is not int or not 0 <= revision <= 2**53 - 1:
+                    raise ValueError()
+                client_id = str(uuid.UUID(client_id))
+            except (ValueError, TypeError, AttributeError):
+                raise web.HTTPBadRequest(text='Нужны write.clientId в формате UUID и целая write.revision от 0 до 9007199254740991.')
+        if self.owned(request) is not job:
+            raise web.HTTPNotFound(text='Модель удалена.')
+        if job['status'] != 'complete' or not (JOB_ROOT / job['id'] / 'model.glb').is_file():
+            raise web.HTTPConflict(text='Сначала дождитесь готовой модели.')
+        writes = dict(job.get('_manualRigWrites', {}))
+        if 'write' in data:
+            if revision <= writes.get(client_id, -1):
+                return web.json_response(self.public(job))
+            writes.pop(client_id, None)
+            writes[client_id] = revision
+            while len(writes) > 64:
+                writes.pop(next(iter(writes)))
+        candidate = {**job, '_manualRigDraft': {'rotation': dict(rotation), 'manual': manual, 'updatedAt': now()},
+                     '_manualRigWrites': writes}
+        self.save(candidate)
+        job.update(candidate)
+        return web.json_response(self.public(job))
 
     def job_busy(self, job):
         jid = job['id']
@@ -697,6 +778,7 @@ class Studio:
 
     def shared_files(self, job):
         files = {'model.glb'}
+        files.update(environment_texture_paths(job, active_only=True).values())
         if job.get('rig', {}).get('available'):
             files.add(job['rig'].get('_path', 'rig/rigged.glb'))
         files.update(f"motions/{motion['id']}/animated.glb" for motion in job.get('motions', []) if motion.get('status') == 'complete')
@@ -707,6 +789,7 @@ class Studio:
         shared.update(status='complete', stage='Готово', progress=100,
                       artifacts={'modelUrl': prefix + 'model.glb'},
                       rig={'available': False, 'status': 'not_requested'}, motions=[])
+        shared['environment'] = environment_payload(job, prefix, active_only=True)
         if 'rotation' in job.get('rig', {}):
             shared['rig']['rotation'] = job['rig']['rotation']
         if job.get('rig', {}).get('available'):
@@ -742,6 +825,7 @@ class Studio:
         job = self.owned(request)
         name = request.match_info['file']
         permitted = {'input.png', 'model.glb', 'preview.webp'} | {f"motions/{m['id']}/animated.glb" for m in job['motions'] if m['status'] == 'complete'}
+        permitted.update(environment_texture_paths(job).values())
         permitted.update(version['path'] for version in job.get('_rigVersions', []))
         if job['rig'].get('available'):
             permitted.add(job['rig'].get('_path', 'rig/rigged.glb'))
@@ -866,11 +950,13 @@ def create_app():
                     web.post(prefix + '/jobs', studio.create_job), web.get(prefix + '/jobs/{job_id}', studio.job_get),
                     web.delete(prefix + '/jobs/{job_id}', studio.delete_job),
                     web.patch(prefix + '/jobs/{job_id}/placement', studio.placement),
+                    web.put(prefix + '/jobs/{job_id}/environment', studio.environment.update),
                     web.post(prefix + '/jobs/{job_id}/share', studio.share_create),
                     web.delete(prefix + '/jobs/{job_id}/share', studio.share_revoke),
                     web.get(prefix + '/shares/{token}', studio.share_get),
                     web.get(prefix + '/shares/{token}/files/{file:.*}', studio.share_file),
                     web.post(prefix + '/jobs/{job_id}/rig', studio.rig),
+                    web.put(prefix + '/jobs/{job_id}/rig-draft', studio.rig_draft),
                     web.post(prefix + '/jobs/{job_id}/animate', studio.animate), web.get(prefix + '/files/{job_id}/{file:.*}', studio.file),
                     web.get(prefix + '/demo/glb', studio.demo), web.post('/api/generate', studio.legacy_generate),
                     web.get('/generate-model', index), web.get('/generate-model/', index), web.get('/playground', index),
