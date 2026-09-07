@@ -7,6 +7,7 @@ import { createManualRigEditor } from './manual-rig-editor.js';
 import { createEnvironment } from './environment.js';
 import { createMeshEditor } from './mesh-editor.js';
 import { readStudioFramePoints } from './studio-frame.js';
+import { modelFiles } from './model-file-cache.js';
 
 const BONES = ['Hips', 'Spine', 'Chest', 'Neck', 'Head', 'UpperArm_L', 'LowerArm_L', 'Hand_L', 'UpperArm_R', 'LowerArm_R', 'Hand_R', 'UpperLeg_L', 'LowerLeg_L', 'Foot_L', 'UpperLeg_R', 'LowerLeg_R', 'Foot_R'];
 let physicsPromise;
@@ -78,7 +79,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   const stage = createEnvironment({ scene, renderer, camera, container, floor, grid, ring, key, rim, hemisphere });
 
   let disposed = false, request = 0, ready = false, world, RAPIER;
-  let loading = false, loadedPercent = 0, loadError = null;
+  let loading = false, loadedPercent = 0, loadError = null, loadPhase = '';
   let model, mixer, action, ragdoll, skeleton, clipName = '', rigAvailable = false;
   let orientationPreview = false;
   let sourceOrientation = false;
@@ -99,10 +100,11 @@ export function createViewer({ container, playground = false, onState = () => {}
     // Otherwise the empty placeholder reappears beneath the loading overlay.
     if (Object.hasOwn(extra, 'loading')) loading = extra.loading;
     if (Object.hasOwn(extra, 'loadedPercent')) loadedPercent = extra.loadedPercent;
+    if (Object.hasOwn(extra, 'phase')) loadPhase = extra.phase;
     if (Object.hasOwn(extra, 'error')) loadError = extra.error;
     const diagnostics = ragdoll?.getDiagnostics();
     const state = {
-      ready, loading, loadedPercent, error: loadError,
+      ready, loading, loadedPercent, phase: loadPhase, error: loadError,
       triangles, rigAvailable, clipName, playing, slow, hitCount, fps, orientationPreview,
       sourceOrientation, rotation: sourceOrientation ? { ...previewRotation } : { x: 0, y: 0, z: 0 },
       position: { x: placement.x, y: placement.y, z: placement.z },
@@ -198,14 +200,17 @@ export function createViewer({ container, playground = false, onState = () => {}
     const sequence = ++request;
     clearModel();
     placement.set(...['x', 'y', 'z'].map((axis) => Math.max(-5, Math.min(5, Number(position[axis]) || 0))));
-    emit({ loading: true, loadedPercent: 0, error: null });
+    emit({ loading: true, loadedPercent: 0, phase: 'starting', error: null });
     let gltf;
     try {
       if (stageSettings !== undefined) await stage.setEnvironment(stageSettings);
       if (disposed || sequence !== request) return;
-      gltf = await new GLTFLoader().loadAsync(url, (event) => {
-        if (sequence === request) emit({ loading: true, loadedPercent: event.total ? Math.round(event.loaded / event.total * 100) : null });
+      const data = await modelFiles.load(url, (progress) => {
+        if (sequence === request) emit({ loading: true, ...progress });
       });
+      if (disposed || sequence !== request) return;
+      emit({ loading: true, phase: 'parsing', loadedPercent: 100 });
+      gltf = await new GLTFLoader().parseAsync(data, new URL('.', new URL(url, window.location.href)).href);
       if (disposed || sequence !== request) { disposeObject(gltf.scene); return; }
       let skins = 0;
       gltf.scene.traverse((object) => {

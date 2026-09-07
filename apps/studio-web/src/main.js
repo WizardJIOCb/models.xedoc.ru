@@ -1005,7 +1005,11 @@ function onViewerState(value) {
   state.viewerState = value;
   $('viewer-empty').hidden = value.ready || Boolean(value.loading) || Boolean(value.error);
   if (Object.hasOwn(value, 'loading')) $('viewer-loading').hidden = !value.loading;
-  if (value.loading) $('viewer-loading-text').textContent = value.loadedPercent ? `Открываем модель · ${value.loadedPercent}%` : state.selectedMotion?.startsWith('library:') ? 'Подготавливаем выбранное движение…' : 'Открываем модель…';
+  if (value.loading) $('viewer-loading-text').textContent = value.phase === 'checking' ? 'Проверяем сохранённую модель…'
+    : value.phase === 'cached' ? 'Открываем модель из кеша…'
+    : value.phase === 'parsing' ? 'Подготавливаем 3D-сцену…'
+    : value.loadedPercent ? `Скачиваем модель · ${value.loadedPercent}%`
+    : state.selectedMotion?.startsWith('library:') ? 'Подготавливаем выбранное движение…' : 'Открываем модель…';
   if (Object.hasOwn(value, 'error')) {
     $('viewer-error').hidden = !value.error;
     $('viewer-error-text').textContent = value.error || '';

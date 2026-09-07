@@ -576,7 +576,10 @@ async function mountModelPage(page, id) {
       const { createViewer } = await import('./viewer.js');
       viewer = createViewer({ container: page.querySelector('#community-detail-viewer'), onState: (state) => {
         loading.hidden = !state.loading;
-        if (state.loading) loading.querySelector('p').textContent = `Открываем модель${state.loadedPercent ? ` · ${state.loadedPercent}%` : '…'}`;
+        if (state.loading) loading.querySelector('p').textContent = state.phase === 'checking' ? 'Проверяем сохранённую модель…'
+          : state.phase === 'cached' ? 'Открываем модель из кеша…'
+          : state.phase === 'parsing' ? 'Подготавливаем 3D-сцену…'
+          : `Скачиваем модель${state.loadedPercent ? ` · ${state.loadedPercent}%` : '…'}`;
         if (state.error) { error.textContent = 'Не удалось открыть 3D-просмотр. Обнови страницу или скачай GLB.'; error.hidden = false; }
       } });
       page.querySelector('[data-reset-camera]').addEventListener('click', () => viewer.frontView());

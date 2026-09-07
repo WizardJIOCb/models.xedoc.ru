@@ -54,7 +54,9 @@ function fixture(skinned = false, suppliedAsset = null) {
     const meshEditor={refreshModel(){},getStatus(){return {enabled:false};}};
     const emit=()=>{}, disposeObject=()=>{}, ensurePhysics=async()=>{};
     const clearModel=()=>{ready=false;model=undefined;sourceOrientation=false;orientationPreview=false;};
-    const GLTFLoader=class{async loadAsync(){return gltf;}};
+    const modelFiles={async load(){return new ArrayBuffer(20);}};
+    const window={location:{href:'http://localhost/playground'}};
+    const GLTFLoader=class{async parseAsync(){return gltf;}};
     ${declaration('load')}
     ${declaration('applyPreviewRotation')}
     ${declaration('setPosition')}
