@@ -30,6 +30,7 @@ from community import Community
 from environment import Environment, payload as environment_payload, texture_paths as environment_texture_paths
 from mesh_edits import MeshEdits, active_path as mesh_path, history_paths as mesh_history_paths, payload as mesh_payload
 from motion_library import MotionLibrary, prefix as motion_library_prefix
+from animation_clip import artifact_response
 
 LOG = logging.getLogger('model-studio')
 DATA = ROOT / 'data'
@@ -847,7 +848,7 @@ class Studio:
         path = JOB_ROOT / job['id'] / name
         if not path.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(path, headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
+        return artifact_response(request, path)
 
     async def file(self, request):
         job = self.owned(request)
@@ -868,7 +869,7 @@ class Studio:
         if not path.is_file():
             raise web.HTTPNotFound()
         policy = 'no-store' if name == 'input.png' else 'private, no-cache'
-        return web.FileResponse(path, headers={'Cache-Control': policy, 'X-Content-Type-Options': 'nosniff'})
+        return artifact_response(request, path, policy=policy)
 
     async def demo(self, request):
         file = DATA / 'demo' / 'doom-rigged.glb'

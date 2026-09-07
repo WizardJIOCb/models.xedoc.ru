@@ -9,6 +9,7 @@ from aiohttp.test_utils import TestServer
 
 import test_studio
 import test_community
+from test_animation_clip import animated_fixture
 
 server = test_studio.server
 SID = 'eeeeeeeeeeeeeeee'
@@ -45,7 +46,7 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
             self.started.set()
             await self.resume.wait()
             output = args[args.index('--output') + 1]
-            output.write_bytes(test_studio.small_glb(rigged=True))
+            output.write_bytes(animated_fixture())
         self.studio.run_blender = blender
         saved = await self.create()
         self.job = self.studio.jobs[saved['id']]
@@ -125,6 +126,27 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get(old)).status, 409)
         self.assertEqual((await self.client.get(self.url())).status, 200)
         self.assertEqual(self.blender_calls, 2)
+
+    async def test_clip_is_cached_and_access_checked_before_304(self):
+        url = self.url() + '?clip=1'
+        response = await self.client.get(url)
+        self.assertEqual(response.status, 200)
+        data = await response.read()
+        self.assertLess(len(data), len(animated_fixture()) / 3)
+        etag = response.headers['ETag']
+        self.assertEqual((await self.client.get(url, headers={'If-None-Match': etag})).status, 304)
+        self.assertEqual(self.blender_calls, 1)
+        public = self.url(public=True) + '?clip=1'
+        self.assertEqual((await self.outsider.get(self.client.make_url(public))).status, 200)
+        await self.client.post(f"/api/model-studio/jobs/{self.job['id']}/share")
+        shared = f"/api/model-studio/shares/{self.job['_shareToken']}/files/library/{self.job['rig']['revision']}/{SID}/animated.glb?clip=1"
+        self.assertEqual((await self.outsider.get(self.client.make_url(shared))).status, 200)
+        self.job.pop('_shareToken')
+        self.assertEqual((await self.outsider.get(self.client.make_url(shared), headers={'If-None-Match': etag})).status, 404)
+        self.job['visibility'] = 'private'
+        self.assertEqual((await self.outsider.get(self.client.make_url(public), headers={'If-None-Match': etag})).status, 404)
+        self.install_rig()
+        self.assertEqual((await self.client.get(url, headers={'If-None-Match': etag})).status, 409)
 
     async def test_bake_blocks_delete_cleanup_and_rig_rebuild(self):
         self.resume.clear()

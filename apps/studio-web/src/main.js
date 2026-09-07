@@ -232,6 +232,7 @@ function playgroundMarkup() {
       <div class="playground-content"><div class="selected-model-name" id="playground-model-name">Модель не выбрана</div><p class="field-hint" id="playground-hint">Открой свою модель из библиотеки ниже или начни с демо.</p>
         <label class="field-label" for="playground-motion">Движение</label><select id="playground-motion" disabled><option value="">Исходная модель</option></select>
         <p id="motion-library-status" class="field-hint" role="status" hidden></p>
+        <p id="playground-motion-progress" class="field-hint" role="status" hidden></p>
         <div id="mesh-edit-panel" hidden></div>
         ${rigPreparationMarkup()}
         ${placementMarkup()}
@@ -1014,6 +1015,11 @@ async function ensureViewer() {
 
 function onViewerState(value) {
   state.viewerState = value;
+  if (isPlayground) {
+    const progress = $('playground-motion-progress');
+    progress.hidden = !value.motionLoading && !value.motionError;
+    progress.textContent = value.motionError || (value.motionPhase === 'checking' ? 'Проверяем движение в кеше…' : value.motionPhase === 'cached' ? 'Применяем движение из кеша…' : value.motionPercent ? `Загружаем только движение · ${value.motionPercent}%` : 'Подготавливаем движение… Модель остаётся в сцене.');
+  }
   $('viewer-empty').hidden = value.ready || Boolean(value.loading) || Boolean(value.error);
   if (Object.hasOwn(value, 'loading')) $('viewer-loading').hidden = !value.loading;
   if (value.loading) $('viewer-loading-text').textContent = value.phase === 'checking' ? 'Проверяем сохранённую модель…'
@@ -1050,7 +1056,11 @@ async function loadSelectedViewer(force = false) {
   // face IDs currently selected by the author. Keep that snapshot until exit.
   if (!force && (state.meshEntryPending || editingMesh(job))) return state.viewerLoadPromise?.catch(() => {});
   const prepare = preparingRig(job) || editingMesh(job);
-  const url = state.demo ? `${API}/demo/glb` : prepare ? job.artifacts.modelUrl : selectedUrl(job);
+  const motion = selectedMotion(job);
+  const separateMotion = isPlayground && !prepare && !sourceView(job) && motion?.glbUrl &&
+    (motion.id.startsWith('library:') || (motion.rigRevision && motion.rigRevision === job?.rig?.revision));
+  const motionUrl = separateMotion ? `${motion.glbUrl}${motion.glbUrl.includes('?') ? '&' : '?'}clip=1` : null;
+  const url = state.demo ? `${API}/demo/glb` : prepare ? job.artifacts.modelUrl : separateMotion ? artifactUrl(job) : selectedUrl(job);
   if (!url) {
     if (job && state.motionLibraryReady && state.selectedMotion?.startsWith('library:')) {
       $('viewer-empty').hidden = $('viewer-loading').hidden = true;
@@ -1063,7 +1073,8 @@ async function loadSelectedViewer(force = false) {
   const position = placementDraft(job)?.position || { x: 0, y: 0, z: 0 };
   const rotation = sourceView(job) ? placementDraft(job).rotation : {};
   const environment = getEnvironmentPreview($('environment-panel'), job?.id) || job?.environment || {};
-  if (!force && state.viewerKey === key) {
+  const reuseModel = !force && state.viewerKey === key;
+  if (reuseModel && state.viewerMotionUrl === motionUrl) {
     state.viewer?.setPosition(position);
     state.viewer?.setOrientation(rotation);
     void state.viewer?.setEnvironment(environment).catch((error) => toast(error.message));
@@ -1071,15 +1082,21 @@ async function loadSelectedViewer(force = false) {
   }
   const requestId = ++state.viewerRequest;
   state.viewerKey = key;
+  state.viewerMotionUrl = motionUrl;
   $('viewer-error').hidden = true;
   $('viewer-empty').hidden = true;
-  $('viewer-loading').hidden = false;
+  $('viewer-loading').hidden = reuseModel;
   $('viewer-loading-text').textContent = state.selectedMotion?.startsWith('library:') ? 'Подготавливаем выбранное движение…' : 'Подготавливаем просмотр…';
   try {
     const viewer = await ensureViewer();
     if (requestId !== state.viewerRequest) return;
     const latestEnvironment = getEnvironmentPreview($('environment-panel'), job?.id) || job?.environment || {};
-    state.viewerLoadPromise = viewer.load(url, { allowRagdoll: !prepare && !sourceView(job) && (state.demo || hasRig(job)), prepare, rotation, position, environment: latestEnvironment });
+    if (!reuseModel) state.viewerModelPromise = viewer.load(url, { allowRagdoll: !prepare && !sourceView(job) && (state.demo || hasRig(job)), prepare, rotation, position, environment: latestEnvironment });
+    state.viewerLoadPromise = (async () => {
+      await state.viewerModelPromise;
+      if (requestId !== state.viewerRequest) return;
+      if (motionUrl || reuseModel) await viewer.setAnimation(motionUrl);
+    })();
     await state.viewerLoadPromise;
     if (requestId !== state.viewerRequest) return;
     state.slow = false;
@@ -1096,6 +1113,9 @@ async function loadSelectedViewer(force = false) {
     if (!isShared && !state.demo && !editingMesh(job) && !state.meshEntryPending && job?.status === 'complete' && !job.previewUrl) void saveModelPreview(job, requestId);
   } catch (error) {
     if (requestId !== state.viewerRequest) return;
+    state.viewerMotionUrl = undefined;
+    if (state.viewerState.ready && motionUrl) { toast(error.message); return; }
+    state.viewerKey = '';
     $('viewer-loading').hidden = true;
     $('viewer-error').hidden = false;
     $('viewer-error-text').textContent = error.message;

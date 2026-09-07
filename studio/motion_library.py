@@ -6,6 +6,7 @@ import time
 import uuid
 
 from aiohttp import web
+from animation_clip import artifact_response
 
 SOURCE_ID = re.compile(r'^[a-f0-9]{16}$')
 REVISION = r'(?:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|legacy)'
@@ -120,7 +121,7 @@ class MotionLibrary:
         # Rights may change while another request's bake was running.
         if not any(row['id'] == sid for row in await self.entries(request)):
             raise web.HTTPNotFound(text='Движение недоступно.')
-        return web.FileResponse(output, headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
+        return artifact_response(request, output)
 
     async def bake(self, request, job, revision, entry, output, authorize):
         async with self.studio.rig_lock:

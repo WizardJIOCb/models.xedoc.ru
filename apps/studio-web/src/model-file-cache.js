@@ -3,7 +3,7 @@
 const CACHE_NAME = 'model-studio-glb-v1';
 const MAX_BYTES = 256 * 1024 * 1024;
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
-const MAX_ENTRIES = 6;
+const MAX_ENTRIES = 48;
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
 export function createModelFileLoader({ fetchImpl = (...args) => fetch(...args), storage, origin, now = Date.now, maxBytes = MAX_BYTES, maxEntries = MAX_ENTRIES } = {}) {

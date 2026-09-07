@@ -81,6 +81,8 @@ export function createViewer({ container, playground = false, onState = () => {}
   let disposed = false, request = 0, ready = false, world, RAPIER;
   let loading = false, loadedPercent = 0, loadError = null, loadPhase = '';
   let model, mixer, action, ragdoll, skeleton, clipName = '', rigAvailable = false;
+  let baseClip, restTransforms = [], animationRequest = 0;
+  let motionLoading = false, motionPercent = 0, motionError = '', motionPhase = '';
   let orientationPreview = false;
   let sourceOrientation = false;
   const previewRotation = { x: 0, y: 0, z: 0 };
@@ -102,9 +104,14 @@ export function createViewer({ container, playground = false, onState = () => {}
     if (Object.hasOwn(extra, 'loadedPercent')) loadedPercent = extra.loadedPercent;
     if (Object.hasOwn(extra, 'phase')) loadPhase = extra.phase;
     if (Object.hasOwn(extra, 'error')) loadError = extra.error;
+    if (Object.hasOwn(extra, 'motionLoading')) motionLoading = extra.motionLoading;
+    if (Object.hasOwn(extra, 'motionPercent')) motionPercent = extra.motionPercent;
+    if (Object.hasOwn(extra, 'motionError')) motionError = extra.motionError;
+    if (Object.hasOwn(extra, 'motionPhase')) motionPhase = extra.motionPhase;
     const diagnostics = ragdoll?.getDiagnostics();
     const state = {
       ready, loading, loadedPercent, phase: loadPhase, error: loadError,
+      motionLoading, motionPercent, motionError, motionPhase,
       triangles, rigAvailable, clipName, playing, slow, hitCount, fps, orientationPreview,
       sourceOrientation, rotation: sourceOrientation ? { ...previewRotation } : { x: 0, y: 0, z: 0 },
       position: { x: placement.x, y: placement.y, z: placement.z },
@@ -148,6 +155,11 @@ export function createViewer({ container, playground = false, onState = () => {}
   }
 
   function clearModel() {
+    animationRequest++;
+    baseClip = undefined;
+    restTransforms = [];
+    motionLoading = false;
+    motionError = '';
     ready = false;
     meshEditor.refreshModel();
     rigAvailable = false;
@@ -266,6 +278,8 @@ export function createViewer({ container, playground = false, onState = () => {}
         scene.add(skeleton);
       }
       const clip = gltf.animations.find((item) => /generated|motion|smpl/i.test(item.name)) ?? gltf.animations.find((item) => /walk/i.test(item.name)) ?? gltf.animations[0];
+      baseClip = clip;
+      model.traverse((node) => restTransforms.push({ node, position: node.position.clone(), quaternion: node.quaternion.clone(), scale: node.scale.clone() }));
       if (clip && animation && !orientationPreview) {
         mixer = new THREE.AnimationMixer(model);
         action = mixer.clipAction(clip).play();
@@ -284,6 +298,59 @@ export function createViewer({ container, playground = false, onState = () => {}
       clearModel();
       emit({ loading: false, error: error.message || 'Не удалось открыть 3D-модель.' });
       throw error;
+    }
+  }
+
+  async function setAnimation(url = null) {
+    const sequence = ++animationRequest, target = model;
+    if (!ready || !target || sourceOrientation) return;
+    let loaded;
+    try {
+      let clip = baseClip;
+      if (url) {
+        emit({ motionLoading: true, motionPercent: 0, motionPhase: 'starting', motionError: '' });
+        const bytes = await modelFiles.load(url, ({ phase, loadedPercent }) => {
+          if (sequence === animationRequest) emit({ motionPhase: phase, motionPercent: loadedPercent });
+        });
+        if (disposed || sequence !== animationRequest || target !== model) return;
+        loaded = await new GLTFLoader().parseAsync(bytes, new URL('.', new URL(url, window.location.href)).href);
+        if (disposed || sequence !== animationRequest || target !== model) return;
+        clip = loaded.animations[0];
+        if (!clip?.tracks.length) throw new Error('В файле нет движения. Выбери другую анимацию.');
+        for (const track of clip.tracks) {
+          const binding = THREE.PropertyBinding.parseTrackName(track.name);
+          if (!THREE.PropertyBinding.findNode(model, binding.nodeName))
+            throw new Error('Движение относится к другому скелету. Обнови страницу.');
+        }
+      }
+      if (!clip) return;
+      ragdoll?.reset();
+      mixer?.stopAllAction();
+      mixer?.uncacheRoot(model);
+      for (const rest of restTransforms) {
+        rest.node.position.copy(rest.position);
+        rest.node.quaternion.copy(rest.quaternion);
+        rest.node.scale.copy(rest.scale);
+      }
+      // Placement may have been edited since the model was first loaded.
+      model.position.copy(basePosition);
+      model.quaternion.copy(baseQuaternion);
+      mixer = new THREE.AnimationMixer(model);
+      action = mixer.clipAction(clip).reset().play();
+      mixer.update(0);
+      clipName = clip.name;
+      patrol = playground && !url && clipName === 'Walk';
+      animationTime = 0;
+      playing = true;
+      model.updateMatrixWorld(true);
+      ragdoll?.update(0);
+      emit({ motionLoading: false, motionError: '' });
+    } catch (error) {
+      if (disposed || sequence !== animationRequest || target !== model) return;
+      emit({ motionLoading: false, motionError: error.message });
+      throw error;
+    } finally {
+      if (loaded) disposeObject(loaded.scene);
     }
   }
 
@@ -482,7 +549,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     if (stateTime > 0.4) { stateTime = 0; emit(); }
   });
   return {
-    load, hit, reset, resetCamera, frontView, setPosition, placeOnFloor,
+    load, setAnimation, hit, reset, resetCamera, frontView, setPosition, placeOnFloor,
     setEnvironment: stage.setEnvironment,
     meshEditor,
     setManualRig(options) {

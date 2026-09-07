@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 from aiohttp import web
+from animation_clip import artifact_response
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 
@@ -359,7 +360,7 @@ class Community:
             return await self.studio.motion_library.artifact(request, job, name, lambda: self.public_model(request))
         if name not in self.studio.shared_files(job):
             raise web.HTTPNotFound(text='Файл модели не найден.')
-        return web.FileResponse(self.model_file(job, name), headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
+        return artifact_response(request, self.model_file(job, name))
 
     async def model_preview(self, request):
         job = self.public_model(request)
