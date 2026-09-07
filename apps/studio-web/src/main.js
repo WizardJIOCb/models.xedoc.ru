@@ -613,6 +613,7 @@ async function submitRig(event) {
   renderRigPreparation();
   try {
     await flushModelSettings(job.id);
+    if (manualRigPanel?.manual(job)) manualRigPanel.prepare(job);
     const manual = manualRigPanel?.manual(job) ? manualRigPanel.payload(job) : null;
     if (manual) await manualRigPanel.flush(job);
     const result = await request(`/jobs/${encodeURIComponent(job.id)}/rig`, {

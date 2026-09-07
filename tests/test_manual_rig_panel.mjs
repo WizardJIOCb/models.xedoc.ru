@@ -93,6 +93,77 @@ function harness(initialJob) {
 }
 
 const passed = [];
+function mirroredFixture() {
+  const points = { head: [0, 1.85, .03], neck: [0, 1.67, 0] };
+  for (const [side, sign] of [['l', -1], ['r', 1]]) {
+    for (const [part, position] of Object.entries({ shoulder: [.24, 1.58, 0], elbow: [.43, 1.27, .02],
+      wrist: [-.08, 1.08, .12], hand: [-.12, 1.04, .13], hip: [.14, .99, 0], knee: [.2, .56, .02],
+      ankle: [.22, .14, 0], toe: [.23, .06, .18] })) points[`${part}_${side}`] = [position[0] * sign, position[1], position[2] + (side === 'l' ? .015 : 0)];
+  }
+  return { version: 1, points };
+}
+{
+  const manual = mirroredFixture(), original = copy(manual);
+  const job = { id: 'mirrored', modelRotation: { x: -11, y: 0, z: 0 }, rig: {},
+    manualRigDraft: { manual, rotation: { x: -11, y: 0, z: 0 } } };
+  const h = harness(job);
+  h.element('manual-joint').value = 'toe_r'; h.element('manual-joint').fire('change');
+  h.element('manual-reviewed').checked = true; h.element('manual-reviewed').fire('change');
+  const corrected = copy(h.panel.payload(job));
+  for (const part of ['shoulder', 'elbow', 'wrist', 'hand', 'hip', 'knee', 'ankle', 'toe']) {
+    assert.deepEqual(corrected.points[`${part}_l`], original.points[`${part}_r`]);
+    assert.deepEqual(corrected.points[`${part}_r`], original.points[`${part}_l`]);
+  }
+  assert.deepEqual(corrected.points.head, original.points.head);
+  assert.deepEqual(corrected.points.neck, original.points.neck);
+  assert.deepEqual(manual, original, 'saved job input must not mutate');
+  assert.equal(h.element('manual-joint').value, 'toe_l', 'selected marker stays at the same physical foot');
+  assert.equal(h.element('manual-reviewed').checked, true, 'coordinate review remains valid');
+  assert.equal(h.element('manual-side-correction').hidden, false);
+  const saving = h.panel.flush(job); await h.settle(); await saving;
+  assert.deepEqual(h.stored.get(job.id).manual, corrected);
+  assert.equal(h.panel.prepare(job), false, 'pre-submit normalization must be idempotent');
+  const reopened = harness({ ...job, manualRigDraft: copy(h.stored.get(job.id)) });
+  assert.deepEqual(copy(reopened.panel.payload(job)), corrected);
+  h.element('manual-undo').fire('click');
+  assert.deepEqual(copy(h.panel.payload(job)), original);
+  assert.equal(h.element('manual-joint').value, 'toe_r');
+  assert.equal(h.element('manual-reviewed').checked, false);
+  assert.equal(h.element('manual-side-correction').hidden, true);
+  passed.push('review corrects whole mirrored chains, saves, reopens and undoes without moving points');
+}
+{
+  const cases = [];
+  const mixed = mirroredFixture(); [mixed.points.hip_l, mixed.points.hip_r] = [mixed.points.hip_r, mixed.points.hip_l]; cases.push(mixed);
+  const partial = mirroredFixture(); delete partial.points.hand_r; cases.push(partial);
+  const ambiguous = mirroredFixture(); ambiguous.points.shoulder_l[0] = ambiguous.points.shoulder_r[0] - .01; cases.push(ambiguous);
+  for (const manual of cases) {
+    const h = harness({ id: 'unchanged', modelRotation: { x: 0, y: 0, z: 0 }, rig: {}, manualRigDraft: { manual, rotation: { x: 0, y: 0, z: 0 } } });
+    assert.equal(h.panel.prepare(h.job), false);
+    assert.deepEqual(copy(h.panel.payload(h.job)), manual);
+    assert.equal(h.requests.length, 0);
+  }
+  const manual = mirroredFixture();
+  const h = harness({ id: 'stale', modelRotation: { x: 10, y: 0, z: 0 }, rig: {}, manualRigDraft: { manual, rotation: { x: 0, y: 0, z: 0 } } });
+  assert.equal(h.panel.prepare(h.job), false);
+  assert.deepEqual(copy(h.panel.payload(h.job)), manual);
+  passed.push('partial, mixed, ambiguous and rotated drafts are not silently relabelled');
+}
+{
+  const manual = mirroredFixture();
+  const h = harness(); h.mode('manual'); h.place(manual.points);
+  const oldSave = h.panel.flush(h.job);
+  assert.equal(h.requests.length, 1);
+  h.panel.prepare(h.job);
+  const corrected = copy(h.panel.payload(h.job));
+  const finalSave = h.panel.flush(h.job);
+  await h.settle(); await Promise.all([oldSave, finalSave]);
+  assert.equal(h.requests.length, 2);
+  assert.ok(h.requests[1].body.write.revision > h.requests[0].body.write.revision);
+  assert.deepEqual(h.stored.get(h.job.id).manual, corrected);
+  assert.deepEqual(h.requests[1].body.manual, corrected, 'final PUT matches the rig payload');
+  passed.push('pre-submit flush waits for old draft then persists corrected revision');
+}
 {
   const h = harness();
   h.mode('manual');

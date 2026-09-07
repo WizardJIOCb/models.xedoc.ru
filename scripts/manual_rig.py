@@ -15,10 +15,16 @@ for _side, _label in (('l', 'слева'), ('r', 'справа')):
                          ('knee', 'колено'), ('ankle', 'лодыжка'), ('toe', 'носок стопы')):
         POINT_LABELS[f'{_part}_{_side}'] = f'{_name} {_label}'
 POINT_NAMES = tuple(POINT_LABELS)
+BILATERAL_PARTS = ('shoulder', 'elbow', 'wrist', 'hand', 'hip', 'knee', 'ankle', 'toe')
 
 
 def validate_manual(value, *, complete=True):
-    """Return a detached JSON-safe input; drafts may omit landmarks."""
+    """Return detached JSON-safe input; normalize mirrored sides on submission.
+
+    Drafts retain the user's labels, including complete drafts. A complete
+    submission can swap all bilateral labels when both torso pairs clearly
+    agree that the user labelled the body from the viewer's perspective.
+    """
     if not isinstance(value, dict) or set(value) != {'version', 'points'}:
         raise ValueError('Нужны manual.version и manual.points с точками суставов.')
     if type(value['version']) is not int or value['version'] != 1:
@@ -39,6 +45,13 @@ def validate_manual(value, *, complete=True):
         clean[name] = [float(coordinate) for coordinate in point]
     result = {'version': 1, 'points': clean}
     if complete:
+        if all(clean[f'{part}_l'][0] < clean[f'{part}_r'][0] - 0.02
+               for part in ('shoulder', 'hip')):
+            # Swap names, not coordinates, and keep each limb chain together.
+            # Distal joints may legitimately cross the body's centre line.
+            for part in BILATERAL_PARTS:
+                left, right = f'{part}_l', f'{part}_r'
+                clean[left], clean[right] = clean[right], clean[left]
         _validate_anatomy(clean)
     return result
 

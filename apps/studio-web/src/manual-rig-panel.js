@@ -21,6 +21,8 @@ export const MANUAL_JOINTS = [
   ['toe_r', 'Носок правой стопы', 'Передняя часть стопы, внутри обуви.'],
 ];
 const IDS = MANUAL_JOINTS.map(([id]) => id);
+const SIDE_PARTS = ['shoulder', 'elbow', 'wrist', 'hand', 'hip', 'knee', 'ankle', 'toe'];
+const oppositeSide = (id) => id.endsWith('_l') ? `${id.slice(0, -2)}_r` : id.endsWith('_r') ? `${id.slice(0, -2)}_l` : id;
 const $ = (id) => document.getElementById(id);
 const clone = (value) => structuredClone(value);
 const sameRotation = (a, b) => ['x', 'y', 'z'].every((axis) => Math.abs((a?.[axis] || 0) - (b?.[axis] || 0)) < 0.001);
@@ -44,6 +46,7 @@ export function manualRigMarkup() {
       <div class="manual-edit-actions"><button type="button" class="button button-quiet button-small" id="manual-undo">Отменить</button><button type="button" class="button button-quiet button-small" id="manual-remove">Удалить точку</button></div>
       <details class="manual-all-points"><summary>Все точки</summary><div>${MANUAL_JOINTS.map(([id, name]) => `<button type="button" data-manual-joint="${id}" aria-pressed="false">${name}</button>`).join('')}</div></details>
       <label class="manual-review"><input type="checkbox" id="manual-reviewed" />Проверил точки спереди и сбоку: они внутри нужных частей тела</label>
+      <p id="manual-side-correction" class="manual-feedback" role="status" hidden>Левая и правая стороны исправлены автоматически. Положение точек сохранено.</p>
     </fieldset>
     <button type="button" class="button button-quiet button-small" id="manual-clear">Начать заново</button>
     <div id="manual-save-error" class="inline-error" role="alert" hidden></div><button type="button" class="button button-quiet button-small" id="manual-save-retry" hidden>Повторить сохранение</button>
@@ -61,7 +64,7 @@ export function createManualRigPanel({ getJob, getViewer, getRotation, request, 
       const points = clone(saved?.manual?.points || {});
       drafts.set(job.id, { points, rotation: clone(saved?.rotation || getRotation(job)), mode: saved ? 'manual' : 'auto',
         selected: IDS.find((id) => !points[id]) || 'head', reviewed: false, undo: [], dirty: false,
-        version: 0, pending: null, timer: null, error: null, saved: Boolean(saved), hint: '' });
+        version: 0, pending: null, timer: null, error: null, saved: Boolean(saved), hint: '', sidesCorrected: false });
     }
     return drafts.get(job.id);
   }
@@ -111,12 +114,37 @@ export function createManualRigPanel({ getJob, getViewer, getRotation, request, 
     }
     draft.lastEdit = now;
     draft.points = clone(points);
+    draft.sidesCorrected = false;
     draft.rotation = clone(getRotation(job));
     draft.hint = hint;
     if (next) draft.selected = IDS.find((id) => !draft.points[id]) || draft.selected;
     markChanged(job, draft);
   }
   function select(id) { const draft = draftFor(getJob()); if (draft && IDS.includes(id)) { draft.selected = id; draft.hint = ''; changedUI(); } }
+  function prepare(job) {
+    const draft = draftFor(job);
+    if (!draft || draft.mode !== 'manual' || stale(job, draft)) return false;
+    const points = draft.points;
+    if (!IDS.every((id) => Array.isArray(points[id]) && points[id].length === 3 && points[id].every(Number.isFinite))) return false;
+    // Torso anchors identify a globally reversed naming convention. Exchange
+    // whole limb chains, including crossed hands/feet; never reflect positions.
+    if (!['shoulder', 'hip'].every((part) => points[`${part}_l`][0] < points[`${part}_r`][0] - 0.02)) return false;
+    const reviewed = draft.reviewed;
+    draft.undo.push({ points: clone(points), rotation: clone(draft.rotation), selected: draft.selected });
+    if (draft.undo.length > 50) draft.undo.shift();
+    draft.points = clone(points);
+    for (const part of SIDE_PARTS) {
+      draft.points[`${part}_l`] = clone(points[`${part}_r`]);
+      draft.points[`${part}_r`] = clone(points[`${part}_l`]);
+    }
+    draft.selected = oppositeSide(draft.selected);
+    draft.lastEdit = 0;
+    draft.sidesCorrected = true;
+    markChanged(job, draft);
+    draft.reviewed = reviewed;
+    changedUI();
+    return true;
+  }
   function render(job, { editing = false, busy = false, ready = false } = {}) {
     const draft = draftFor(job);
     active = Boolean(editing && draft?.mode === 'manual');
@@ -143,6 +171,7 @@ export function createManualRigPanel({ getJob, getViewer, getRotation, request, 
       $('manual-coordinates').hidden = !draft.points[draft.selected];
       $('manual-reviewed').disabled = count !== IDS.length || locked || outOfDate;
       $('manual-reviewed').checked = draft.reviewed;
+      $('manual-side-correction').hidden = !draft.sidesCorrected;
       $('manual-save-error').hidden = !draft.error;
       $('manual-save-error').textContent = draft.error || '';
       $('manual-save-retry').hidden = !draft.error;
@@ -202,15 +231,23 @@ export function createManualRigPanel({ getJob, getViewer, getRotation, request, 
     if (locked) return;
     draft.undo.push({ points: clone(draft.points), rotation: clone(draft.rotation) });
     draft.points = {}; draft.rotation = clone(getRotation(job)); draft.selected = 'head'; draft.hint = 'Точки очищены. Действие можно отменить.';
+    draft.sidesCorrected = false;
     markChanged(job, draft);
   });
   $('manual-undo').addEventListener('click', () => {
     const job = getJob(), draft = draftFor(job), previous = draft.undo.pop();
     if (!previous || locked) return;
     draft.points = previous.points; draft.rotation = previous.rotation; draft.lastEdit = 0;
+    draft.selected = previous.selected || draft.selected;
+    draft.sidesCorrected = false;
     markChanged(job, draft);
   });
-  $('manual-reviewed').addEventListener('change', () => { draftFor(getJob()).reviewed = $('manual-reviewed').checked; changedUI(); });
+  $('manual-reviewed').addEventListener('change', () => {
+    const job = getJob(), reviewed = $('manual-reviewed').checked;
+    if (reviewed) prepare(job);
+    draftFor(job).reviewed = reviewed;
+    changedUI();
+  });
   $('manual-restore-rotation').addEventListener('click', () => restoreRotation(clone(draftFor(getJob()).rotation)));
   $('manual-save-retry').addEventListener('click', () => { void flush().catch(() => {}); });
   function persistOnExit() {
@@ -229,7 +266,7 @@ export function createManualRigPanel({ getJob, getViewer, getRotation, request, 
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persistOnExit(); });
   window.addEventListener('pagehide', persistOnExit);
-  return { render, flush,
+  return { render, flush, prepare,
     manual: (job) => draftFor(job)?.mode === 'manual',
     payload: (job) => ({ version: 1, points: clone(draftFor(job).points) }),
     reset() { for (const draft of drafts.values()) clearTimeout(draft.timer); drafts.clear(); clientId = crypto.randomUUID(); getViewer()?.setManualRig?.({ enabled: false }); },

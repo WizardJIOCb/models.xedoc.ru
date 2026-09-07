@@ -691,6 +691,61 @@ class StudioHTTPTests(unittest.IsolatedAsyncioTestCase):
         persisted = json.loads((server.JOB_ROOT / job['id'] / 'job.json').read_text(encoding='utf-8'))
         self.assertEqual(persisted['rig']['manual'], manual)
 
+    async def test_mirrored_manual_draft_is_preserved_until_rig_then_canonical_after_restart(self):
+        job = await self.create()
+        endpoint = f"/api/model-studio/jobs/{job['id']}"
+        canonical = manual_fixture()
+        # Asymmetric coordinates catch reflection or sorting individual joints
+        # instead of moving the original limb chains to the correct labels.
+        canonical['points']['wrist_l'][2] = .17
+        canonical['points']['knee_r'][0] = -.26
+        mirrored = copy.deepcopy(canonical)
+        for name in canonical['points']:
+            if name.endswith('_l'):
+                other = name[:-1] + 'r'
+                mirrored['points'][name], mirrored['points'][other] = (
+                    mirrored['points'][other], mirrored['points'][name])
+        rotation = {'x': -11, 'y': 0, 'z': 0}
+        data = {'rotation': rotation, 'manual': mirrored,
+                'write': {'clientId': str(uuid.uuid4()), 'revision': 1}}
+        response = await self.client.put(endpoint + '/rig-draft', json=data)
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual((await response.json())['manualRigDraft']['manual'], mirrored)
+
+        calls = []
+        async def rig(script, args, output_dir, timeout=900):
+            points_file = args[args.index('--manual-points') + 1]
+            calls.append(json.loads(points_file.read_text(encoding='utf-8')))
+            await self.fake_rig(script, args, output_dir)
+        self.studio.run_blender = rig
+        response = await self.client.post(endpoint + '/rig', json={'rotation': rotation, 'manual': mirrored})
+        self.assertEqual(response.status, 202, await response.text())
+        self.assertEqual((await response.json())['manualRigDraft']['manual'], canonical)
+        await asyncio.wait_for(self.studio.rig_queue.join(), 10)
+        self.assertEqual(calls, [canonical])
+        saved = self.studio.jobs[job['id']]
+        self.assertEqual(saved['rig']['manual'], canonical)
+        self.assertEqual(saved['rig']['manualRotation'], rotation)
+        self.assertEqual(saved['_manualRigDraft']['manual'], canonical)
+        # An already-sent draft save must not revert the canonical submission.
+        response = await self.client.put(endpoint + '/rig-draft', json=data)
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual((await response.json())['manualRigDraft']['manual'], canonical)
+        persisted = json.loads((server.JOB_ROOT / job['id'] / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual(persisted['_manualRigDraft']['manual'], canonical)
+
+        session = self.client.session.cookie_jar.filter_cookies(self.client.make_url('/'))['model_studio_session'].value
+        await self.client.close()
+        self.app = server.create_app()
+        self.client = TestClient(TestServer(self.app), cookie_jar=aiohttp.CookieJar(unsafe=True))
+        await self.client.start_server()
+        self.client.session.cookie_jar.update_cookies({'model_studio_session': session}, response_url=self.client.make_url('/'))
+        self.studio = self.app['studio']
+        reopened = await (await self.client.get(endpoint)).json()
+        self.assertEqual(reopened['manualRigDraft']['manual'], canonical)
+        self.assertEqual(reopened['rig']['manual'], canonical)
+        self.assertEqual(FakePipeline.submissions, 1)
+
     async def test_manual_draft_is_owner_only_partial_private_and_survives_restart(self):
         job = await self.create()
         endpoint = f"/api/model-studio/jobs/{job['id']}"
