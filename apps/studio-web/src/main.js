@@ -119,6 +119,15 @@ $('app').innerHTML = `
   </dialog>
 `;
 
+if (isPlayground) {
+  const stage = document.querySelector('.playground-stage');
+  // Let a tall sticky column scroll far enough to reach its comment form and replies.
+  const stageObserver = new ResizeObserver(([entry]) => {
+    stage.style.setProperty('--stage-height', `${Math.ceil(entry.target.getBoundingClientRect().height)}px`);
+  });
+  stageObserver.observe(stage);
+}
+
 const manualRigPanel = isPlayground && !isShared ? createManualRigPanel({
   getJob, getViewer: () => state.viewer, getRotation: (job) => placementDraft(job).rotation,
   request, repaint: renderRigPreparation,
