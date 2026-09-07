@@ -221,6 +221,51 @@ export function createRagdoll({ THREE, RAPIER, world, model, scene }) {
   const tempParentQ = Q();
   const tempDelta = Q();
   const tempAxis = V();
+  let grab = null;
+  const grabPoint = V(), grabVelocity = V(), grabImpulse = V(), grabLever = V();
+
+  function endGrab() { grab = null; }
+
+  function beginGrab(point, name) {
+    if (disposed || ![point.x, point.y, point.z].every(Number.isFinite)) return null;
+    if (!enabled) setEnabled(true);
+    let entry = entriesByName.get(name);
+    if (!entry) {
+      entry = bodyEntries.reduce((best, item) =>
+        V().copy(item.body.translation()).distanceToSquared(point) < V().copy(best.body.translation()).distanceToSquared(point) ? item : best);
+    }
+    const localAnchor = V().copy(point).sub(entry.body.translation())
+      .clampLength(0, 0.35).applyQuaternion(Q().copy(entry.body.rotation()).invert());
+    grab = { entry, localAnchor, target: V().copy(point) };
+    for (const item of bodyEntries) item.body.wakeUp();
+    return entry.name;
+  }
+
+  function moveGrab(point) {
+    if (!grab || ![point.x, point.y, point.z].every(Number.isFinite)) return false;
+    grab.target.copy(point);
+    return true;
+  }
+
+  function stepGrab(dt) {
+    if (!grab || !enabled || disposed || !(dt > 0 && dt <= 0.05)) return;
+    const body = grab.entry.body;
+    grabLever.copy(grab.localAnchor).applyQuaternion(Q().copy(body.rotation()));
+    grabPoint.copy(body.translation()).add(grabLever);
+    grabVelocity.copy(body.angvel()).cross(grabLever).add(body.linvel());
+    // A damped, force-limited spring at the picked point. Never teleport a limb
+    // or turn it kinematic: the rest of the skeleton still follows its joints.
+    const stiffness = 1800, damping = 100, mass = Math.max(body.mass(), 0.5);
+    const implicit = 1 + damping * dt / mass + stiffness * dt * dt / mass;
+    grabImpulse.copy(grab.target).sub(grabPoint).clampLength(0, 3).multiplyScalar(stiffness)
+      .addScaledVector(grabVelocity, -damping).multiplyScalar(dt / implicit).clampLength(0, 1400 * dt);
+    body.applyImpulseAtPoint(grabImpulse, grabPoint, true);
+  }
+
+  function grabPoints() {
+    if (!grab) return null;
+    return { anchor: V().copy(grab.localAnchor).applyQuaternion(Q().copy(grab.entry.body.rotation())).add(grab.entry.body.translation()), target: grab.target.clone() };
+  }
 
   function sampleAnimation(dt, captureVelocity = true) {
     model.updateMatrixWorld(true);
@@ -264,6 +309,7 @@ export function createRagdoll({ THREE, RAPIER, world, model, scene }) {
         entry.body.wakeUp();
       }
     } else {
+      endGrab();
       enabled = false;
       for (const entry of bodyEntries) {
         entry.body.setLinvel(ZERO, false);
@@ -342,6 +388,7 @@ export function createRagdoll({ THREE, RAPIER, world, model, scene }) {
     }));
     return {
       enabled, bodyCount: bodyEntries.length, jointCount: joints.length,
+      grabbedBody: grab?.entry.name || null,
       hingeCount: joints.filter((item) => item.hinge).length,
       limitedJointCount: joints.length,
       massKg: perBody.reduce((sum, item) => sum + item.mass, 0),
@@ -354,6 +401,7 @@ export function createRagdoll({ THREE, RAPIER, world, model, scene }) {
   }
 
   function reset() {
+    endGrab();
     setEnabled(false);
     for (const rest of restPose) {
       rest.bone.position.copy(rest.position);
@@ -370,6 +418,7 @@ export function createRagdoll({ THREE, RAPIER, world, model, scene }) {
 
   function dispose() {
     if (disposed) return;
+    endGrab();
     for (const item of joints) world.removeImpulseJoint(item.joint, false);
     for (const entry of bodyEntries) world.removeRigidBody(entry.body);
     debugGroup.traverse((object) => {
@@ -385,6 +434,6 @@ export function createRagdoll({ THREE, RAPIER, world, model, scene }) {
   return {
     get enabled() { return enabled; },
     bodies, bodyEntries, joints, debugGroup,
-    setEnabled, update, impulseAt, reset, dispose, getDiagnostics,
+    setEnabled, update, impulseAt, beginGrab, moveGrab, stepGrab, endGrab, grabPoints, reset, dispose, getDiagnostics,
   };
 }

@@ -14,7 +14,7 @@ let physicsPromise;
 
 export function createViewer({ container, playground = false, onState = () => {} }) {
   const canvas = document.createElement('canvas');
-  canvas.setAttribute('aria-label', playground ? 'Интерактивная 3D-арена. Перетаскивайте для вращения, нажмите на персонажа для удара.' : 'Просмотр 3D-модели. Перетаскивайте для вращения.');
+  canvas.setAttribute('aria-label', playground ? 'Интерактивная 3D-арена. Левая кнопка: вращение и удар. Удерживайте правую кнопку на теле, чтобы тащить ragdoll.' : 'Просмотр 3D-модели. Перетаскивайте для вращения.');
   canvas.tabIndex = 0;
   container.append(canvas);
   const scene = new THREE.Scene();
@@ -118,6 +118,7 @@ export function createViewer({ container, playground = false, onState = () => {}
       mode: ragdoll?.enabled ? 'ragdoll' : clipName ? 'animation' : 'static',
       bodyCount: diagnostics?.bodyCount ?? 0,
       jointCount: diagnostics?.jointCount ?? 0,
+      grabbedBody: diagnostics?.grabbedBody || null,
       finite: diagnostics ? !diagnostics.hasNaN : true,
       rootHeight: diagnostics?.rootHeight,
       ...extra,
@@ -126,6 +127,7 @@ export function createViewer({ container, playground = false, onState = () => {}
     container.dataset.mode = state.mode;
     container.dataset.rigAvailable = String(rigAvailable);
     container.dataset.finite = String(state.finite);
+    container.dataset.grabbedBody = state.grabbedBody || '';
     container.dataset.orientationPreview = String(orientationPreview);
     container.dataset.rotation = JSON.stringify(state.rotation);
     container.dataset.position = JSON.stringify(state.position);
@@ -155,6 +157,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   }
 
   function clearModel() {
+    endBodyDrag();
     animationRequest++;
     baseClip = undefined;
     restTransforms = [];
@@ -302,6 +305,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   }
 
   async function setAnimation(url = null) {
+    endBodyDrag();
     const sequence = ++animationRequest, target = model;
     if (!ready || !target || sourceOrientation) return;
     let loaded;
@@ -431,6 +435,7 @@ export function createViewer({ container, playground = false, onState = () => {}
   }
 
   function reset() {
+    endBodyDrag();
     if (!ready) return;
     model.position.copy(basePosition);
     model.quaternion.copy(baseQuaternion);
@@ -472,9 +477,89 @@ export function createViewer({ container, playground = false, onState = () => {}
   }
 
   const raycaster = new THREE.Raycaster(), pointer = new THREE.Vector2();
-  let pointerStart;
-  function pointerDown(event) { pointerStart = { x: event.clientX, y: event.clientY, time: performance.now() }; }
+  let pointerStart, bodyDrag = null;
+  const dragPlane = new THREE.Plane(), dragTarget = new THREE.Vector3();
+  const grabMarker = new THREE.Mesh(new THREE.SphereGeometry(0.035, 12, 8), new THREE.MeshBasicMaterial({ color: 0x50ffe5, depthTest: false }));
+  const grabLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineBasicMaterial({ color: 0x50ffe5, depthTest: false, transparent: true, opacity: 0.8 }));
+  grabMarker.visible = grabLine.visible = false;
+  grabMarker.renderOrder = grabLine.renderOrder = 20;
+  grabLine.frustumCulled = false;
+  scene.add(grabMarker, grabLine);
+
+  function pointerRay(event) {
+    const rect = canvas.getBoundingClientRect();
+    pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
+    raycaster.setFromCamera(pointer, camera);
+  }
+
+  function pickedBone(intersection) {
+    const mesh = intersection.object, face = intersection.face;
+    const indices = mesh.geometry?.attributes.skinIndex, weights = mesh.geometry?.attributes.skinWeight;
+    if (!mesh.isSkinnedMesh || !face || !indices || !weights) return null;
+    const vertices = [face.a, face.b, face.c].map((i) => mesh.getVertexPosition(i, new THREE.Vector3()).applyMatrix4(mesh.matrixWorld));
+    const bary = new THREE.Triangle(...vertices).getBarycoord(intersection.point, new THREE.Vector3());
+    if (!bary) return null;
+    const totals = new Map();
+    [face.a, face.b, face.c].forEach((index, corner) => {
+      for (let slot = 0; slot < 4; slot++) {
+        const name = mesh.skeleton.bones[indices.getComponent(index, slot)]?.name;
+        if (BONES.includes(name)) totals.set(name, (totals.get(name) || 0) + weights.getComponent(index, slot) * bary.getComponent(corner));
+      }
+    });
+    return [...totals].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  }
+
+  function endBodyDrag() {
+    if (!bodyDrag) return;
+    const previous = bodyDrag;
+    bodyDrag = null;
+    ragdoll?.endGrab();
+    controls.enabled = previous.controlsEnabled;
+    canvas.style.cursor = previous.cursor;
+    grabMarker.visible = grabLine.visible = false;
+    if (canvas.hasPointerCapture(previous.pointerId)) canvas.releasePointerCapture(previous.pointerId);
+    emit();
+  }
+
+  function pointerDown(event) {
+    if (bodyDrag) return;
+    pointerStart = event.button === 0 ? { x: event.clientX, y: event.clientY, time: performance.now() } : null;
+    if (event.button !== 2 || !playground || !ready || !ragdoll || manualEditor.enabled || meshEditor.getStatus().enabled) return;
+    pointerRay(event);
+    model.updateMatrixWorld(true);
+    model.traverse((object) => { if (object.isSkinnedMesh) object.computeBoundingSphere(); });
+    const intersection = raycaster.intersectObject(model, true)[0];
+    if (!intersection) return;
+    const name = ragdoll.beginGrab(intersection.point, pickedBone(intersection));
+    if (!name) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    bodyDrag = { pointerId: event.pointerId, controlsEnabled: controls.enabled, cursor: canvas.style.cursor };
+    controls.enabled = false;
+    canvas.style.cursor = 'grabbing';
+    canvas.setPointerCapture(event.pointerId);
+    dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), intersection.point);
+    grabMarker.position.copy(intersection.point);
+    grabMarker.visible = true;
+    emit();
+  }
+
+  function pointerMove(event) {
+    if (!bodyDrag || event.pointerId !== bodyDrag.pointerId) return;
+    if (!(event.buttons & 2)) { endBodyDrag(); return; }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    pointerRay(event);
+    if (raycaster.ray.intersectPlane(dragPlane, dragTarget)) {
+      dragTarget.clamp(new THREE.Vector3(-12, 0.02, -12), new THREE.Vector3(12, 8, 12));
+      ragdoll.moveGrab(dragTarget);
+    }
+  }
+
   function pointerUp(event) {
+    if (bodyDrag && event.pointerId === bodyDrag.pointerId) {
+      event.preventDefault(); event.stopImmediatePropagation(); endBodyDrag(); pointerStart = null; return;
+    }
     if (manualEditor.enabled || meshEditor.getStatus().enabled || !playground || !pointerStart || !ready || !ragdoll || event.button !== 0) return;
     if (Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5 || performance.now() - pointerStart.time > 500) return;
     const rect = canvas.getBoundingClientRect();
@@ -484,8 +569,17 @@ export function createViewer({ container, playground = false, onState = () => {}
     const intersection = raycaster.intersectObject(model, true)[0];
     if (intersection) hit(intersection.point);
   }
-  canvas.addEventListener('pointerdown', pointerDown);
-  canvas.addEventListener('pointerup', pointerUp);
+  function pointerCancel(event) { if (event.pointerId === bodyDrag?.pointerId) endBodyDrag(); pointerStart = null; }
+  function contextMenu(event) { if (playground && ready && ragdoll && !manualEditor.enabled && !meshEditor.getStatus().enabled) event.preventDefault(); }
+  function visibilityChanged() { if (document.hidden) endBodyDrag(); }
+  canvas.addEventListener('pointerdown', pointerDown, true);
+  canvas.addEventListener('pointermove', pointerMove, true);
+  canvas.addEventListener('pointerup', pointerUp, true);
+  canvas.addEventListener('pointercancel', pointerCancel);
+  canvas.addEventListener('lostpointercapture', pointerCancel);
+  canvas.addEventListener('contextmenu', contextMenu);
+  window.addEventListener('blur', endBodyDrag);
+  document.addEventListener('visibilitychange', visibilityChanged);
   const resize = () => {
     const { width, height } = container.getBoundingClientRect();
     if (!width || !height || disposed) return;
@@ -522,6 +616,7 @@ export function createViewer({ container, playground = false, onState = () => {}
         model.updateMatrixWorld(true);
         ragdoll?.update(STEP);
       }
+      ragdoll?.stepGrab(STEP);
       world?.step();
       if (ragdoll?.enabled) ragdoll.update(STEP);
       for (const { body, mesh } of props) { mesh.position.copy(body.translation()); mesh.quaternion.copy(body.rotation()); }
@@ -535,12 +630,21 @@ export function createViewer({ container, playground = false, onState = () => {}
       particle.mesh.material.opacity = Math.min(1, particle.life * 4);
       if (particle.life <= 0) { particle.mesh.removeFromParent(); disposeObject(particle.mesh); particles.splice(i, 1); }
     }
-    if (playground && ready && !orientationPreview && !manualEditor.enabled && !meshEditor.getStatus().enabled && model.getObjectByName('Hips')) {
+    if (playground && ready && !bodyDrag && !orientationPreview && !manualEditor.enabled && !meshEditor.getStatus().enabled && model.getObjectByName('Hips')) {
       const target = model.getObjectByName('Hips').getWorldPosition(new THREE.Vector3());
       target.y = Math.max(0.55, Math.min(1.1, target.y));
       controls.target.lerp(target, 1 - Math.exp(-realDt * 1.2));
     }
-    controls.update();
+    if (!bodyDrag) controls.update();
+    const held = ragdoll?.grabPoints();
+    if (held) {
+      grabMarker.position.copy(held.anchor);
+      const line = grabLine.geometry.attributes.position;
+      line.setXYZ(0, held.anchor.x, held.anchor.y, held.anchor.z);
+      line.setXYZ(1, held.target.x, held.target.y, held.target.z);
+      line.needsUpdate = true;
+      grabLine.visible = true;
+    }
     renderer.render(scene, camera);
     fpsElapsed += realDt;
     frameCount++;
@@ -583,8 +687,14 @@ export function createViewer({ container, playground = false, onState = () => {}
       manualEditor.dispose();
       meshEditor.dispose();
       observer.disconnect();
-      canvas.removeEventListener('pointerdown', pointerDown);
-      canvas.removeEventListener('pointerup', pointerUp);
+      canvas.removeEventListener('pointerdown', pointerDown, true);
+      canvas.removeEventListener('pointermove', pointerMove, true);
+      canvas.removeEventListener('pointerup', pointerUp, true);
+      canvas.removeEventListener('pointercancel', pointerCancel);
+      canvas.removeEventListener('lostpointercapture', pointerCancel);
+      canvas.removeEventListener('contextmenu', contextMenu);
+      window.removeEventListener('blur', endBodyDrag);
+      document.removeEventListener('visibilitychange', visibilityChanged);
       controls.dispose();
       world?.free();
       stage.dispose();

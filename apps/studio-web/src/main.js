@@ -241,7 +241,7 @@ function playgroundMarkup() {
         <label class="range-heading" for="power">Сила удара <output id="power-value">5 / 10</output></label><input id="power" type="range" min="1" max="10" value="5" disabled />
         <div class="toggle-controls"><button class="toggle-button" id="slow" aria-pressed="false" disabled><span>Замедление <kbd>T</kbd></span><span class="switch"></span></button><button class="toggle-button" id="physics" aria-pressed="false" disabled><span>Показать скелет</span><span class="switch"></span></button><button class="toggle-button" id="pause" aria-pressed="false" disabled><span>Пауза анимации</span><span class="switch"></span></button></div>
         <div class="arena-metrics"><div><strong id="hit-count">00</strong><span>попаданий</span></div><div><strong id="body-count">—</strong><span>физических тел</span></div><div><strong id="joint-count">—</strong><span>суставов</span></div></div>
-        <p class="playground-note">Нажми на тело, чтобы приложить импульс в точке удара. Перетаскивание вращает камеру.</p>
+        <p class="playground-note">Левая кнопка: клик — удар, перетаскивание — камера. Удерживай правую кнопку на любой части тела, чтобы тащить ragdoll. Отпусти — персонаж продолжит падать.</p>
         <a class="button button-secondary full-width" id="create-motion-link" href="/generate-model#animation-panel" hidden>${icon('play')}Создать движение по тексту</a>
         <a class="button button-quiet full-width" id="back-to-model" href="/generate-model">${icon('arrow')}К генерации модели</a>
         <a class="button button-secondary full-width" id="playground-download" download hidden>${icon('download')}Скачать GLB</a>
@@ -1034,7 +1034,7 @@ function onViewerState(value) {
   $('viewer-stats').textContent = value.ready ? `${Math.round(value.triangles).toLocaleString('ru')} треугольников` : '';
   $('viewer-status').textContent = state.demo ? 'ДЕМО · DOOM SLAYER' : value.ready ? value.mode === 'ragdoll' ? 'RAGDOLL АКТИВЕН' : value.clipName ? 'АНИМАЦИЯ' : 'ПРОСМОТР 3D' : 'ПРОСМОТР 3D';
   if (!isPlayground) return;
-  $('arena-mode').innerHTML = `<span class="status-dot ${value.ready ? 'online' : ''}"></span> ${value.ready ? editingMesh() ? 'Очистка модели' : value.orientationPreview ? 'Выравнивание исходной модели' : value.mode === 'ragdoll' ? 'Физика активна' : value.clipName ? 'Анимация воспроизводится' : 'Статичная модель' : 'Выбери модель для просмотра'}`;
+  $('arena-mode').innerHTML = `<span class="status-dot ${value.ready ? 'online' : ''}"></span> ${value.ready ? editingMesh() ? 'Очистка модели' : value.orientationPreview ? 'Выравнивание исходной модели' : value.grabbedBody ? 'Захват тела · отпусти правую кнопку, чтобы отпустить' : value.mode === 'ragdoll' ? 'Физика активна' : value.clipName ? 'Анимация воспроизводится' : 'Статичная модель' : 'Выбери модель для просмотра'}`;
   $('arena-fps').textContent = value.ready ? `${value.fps} FPS` : 'WEBGL';
   $('hit-count').textContent = String(value.hitCount).padStart(2, '0');
   $('body-count').textContent = value.bodyCount || '—';
