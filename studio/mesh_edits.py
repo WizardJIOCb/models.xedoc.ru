@@ -392,6 +392,7 @@ class MeshEdits:
         if self.studio.owned(request) is not job:
             raise web.HTTPNotFound(text='Модель удалена или недоступна.')
         if (job.get('status') != 'complete' or job.get('rig', {}).get('status') in ('queued', 'running')
+                or (getattr(self.studio, 'motion_library', None) and self.studio.motion_library.busy(job))
                 or any(m.get('status') in ('queued', 'running') for m in job.get('motions', []))
                 or getattr(self.studio, 'worker_job', None) == job['id']
                 or getattr(self.studio, 'rig_worker_job', None) == job['id']

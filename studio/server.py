@@ -29,6 +29,7 @@ from manual_rig import validate_manual
 from community import Community
 from environment import Environment, payload as environment_payload, texture_paths as environment_texture_paths
 from mesh_edits import MeshEdits, active_path as mesh_path, history_paths as mesh_history_paths, payload as mesh_payload
+from motion_library import MotionLibrary, prefix as motion_library_prefix
 
 LOG = logging.getLogger('model-studio')
 DATA = ROOT / 'data'
@@ -83,6 +84,7 @@ class Studio:
         self.community = Community(self, DATA, JOB_ROOT)
         self.environment = Environment(self, JOB_ROOT)
         self.mesh_edits = MeshEdits(self, JOB_ROOT)
+        self.motion_library = MotionLibrary(self, JOB_ROOT, KIMODO)
 
     def save(self, job):
         job['updatedAt'] = now()
@@ -104,6 +106,8 @@ class Studio:
             result['meshEdit'] = mesh_payload(job)
             if result.get('artifacts', {}).get('modelUrl'):
                 result['artifacts']['modelUrl'] = self.file_url(job, mesh_path(job))
+            if url := motion_library_prefix(job, self.file_url(job, '')):
+                result['artifacts']['motionLibraryUrl'] = url
         return result
 
     def owned(self, request):
@@ -143,6 +147,7 @@ class Studio:
         self.rig_worker = asyncio.create_task(self.work_rigs())
 
     async def stop(self, app):
+        await self.motion_library.close()
         for worker in (self.worker, self.rig_worker):
             worker.cancel()
         for worker in (self.worker, self.rig_worker):
@@ -551,6 +556,8 @@ class Studio:
         job = self.owned(request)
         self.limit(request)
         def ready():
+            if self.motion_library.busy(job):
+                raise web.HTTPConflict(text='Дождись подготовки выбранного движения.')
             if job['status'] != 'complete' or not (JOB_ROOT / job['id'] / 'model.glb').is_file():
                 raise web.HTTPConflict(text='Сначала дождитесь готовой модели.')
             if job['rig'].get('status') in ('queued', 'running') or any(m['status'] in ('queued', 'running') for m in job['motions']):
@@ -638,6 +645,7 @@ class Studio:
     def job_busy(self, job):
         jid = job['id']
         return (job['status'] not in ('complete', 'failed')
+                or self.motion_library.busy(job)
                 or job.get('rig', {}).get('status') in ('queued', 'running')
                 or any(m.get('status') in ('queued', 'running') for m in job.get('motions', []))
                 or jid in (self.worker_job, self.rig_worker_job)
@@ -799,12 +807,14 @@ class Studio:
         return files
 
     def shared_payload(self, job, prefix, include_prompts=True):
-        shared = {key: job[key] for key in ('id', 'title', 'name', 'mode', 'stats', 'placement', 'modelRotation', 'updatedAt') if key in job}
+        shared = {key: job[key] for key in ('id', 'title', 'name', 'mode', 'visibility', 'stats', 'placement', 'modelRotation', 'updatedAt') if key in job}
         shared.update(status='complete', stage='Готово', progress=100,
                       artifacts={'modelUrl': prefix + mesh_path(job)},
                       rig={'available': False, 'status': 'not_requested'}, motions=[])
         shared['environment'] = environment_payload(job, prefix, active_only=True)
         shared['meshEdit'] = mesh_payload(job)
+        if url := motion_library_prefix(job, prefix):
+            shared['artifacts']['motionLibraryUrl'] = url
         if 'rotation' in job.get('rig', {}):
             shared['rig']['rotation'] = job['rig']['rotation']
         if job.get('rig', {}).get('available'):
@@ -830,6 +840,8 @@ class Studio:
     async def share_file(self, request):
         job, token = self.shared(request)
         name = request.match_info['file']
+        if self.motion_library.matches(name):
+            return await self.motion_library.artifact(request, job, name, lambda: self.shared(request)[0])
         if name not in self.shared_files(job):
             raise web.HTTPNotFound()
         path = JOB_ROOT / job['id'] / name
@@ -840,6 +852,8 @@ class Studio:
     async def file(self, request):
         job = self.owned(request)
         name = request.match_info['file']
+        if self.motion_library.matches(name):
+            return await self.motion_library.artifact(request, job, name, lambda: self.owned(request))
         permitted = {'input.png', 'model.glb', 'preview.webp'} | {f"motions/{m['id']}/animated.glb" for m in job['motions'] if m['status'] == 'complete'}
         permitted.update(mesh_history_paths(job))
         permitted.update(environment_texture_paths(job).values())
@@ -971,6 +985,7 @@ def create_app():
     prefix = '/api/model-studio'
     app.add_routes(studio.community.routes(prefix))
     app.add_routes([web.get(prefix + '/health', studio.health), web.get(prefix + '/jobs', studio.jobs_list),
+                    web.get(prefix + '/motion-library', studio.motion_library.catalog),
                     web.post(prefix + '/jobs', studio.create_job), web.get(prefix + '/jobs/{job_id}', studio.job_get),
                     web.delete(prefix + '/jobs/{job_id}', studio.delete_job),
                     web.post(prefix + '/jobs/{job_id}/mesh-edit', studio.mesh_edits.edit),

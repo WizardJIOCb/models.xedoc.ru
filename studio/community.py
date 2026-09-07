@@ -355,6 +355,8 @@ class Community:
     async def model_artifact(self, request):
         job = self.public_model(request)
         name = request.match_info['file']
+        if self.studio.motion_library.matches(name):
+            return await self.studio.motion_library.artifact(request, job, name, lambda: self.public_model(request))
         if name not in self.studio.shared_files(job):
             raise web.HTTPNotFound(text='Файл модели не найден.')
         return web.FileResponse(self.model_file(job, name), headers={'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff'})
@@ -437,8 +439,14 @@ class Community:
         can_delete = bool(request.get('account') and request['account']['id'] == row['user_id']) or self.owns(request, job)
         return {'id': row['id'], 'body': row['body'], 'createdAt': row['created_at'], 'author': self.user(author), 'canDelete': can_delete}
 
+    def comment_model(self, request):
+        job = self.studio.jobs.get(request.match_info['model_id'])
+        if not job or not (self.is_public(job) or self.owns(request, job)):
+            raise web.HTTPNotFound(text='Модель недоступна.')
+        return job
+
     async def comments(self, request):
-        job = self.public_model(request)
+        job = self.comment_model(request)
         offset, limit = self.pagination(request, 30)
         total = self.db.execute('SELECT COUNT(*) FROM comments WHERE model_id = ?', (job['id'],)).fetchone()[0]
         rows = self.db.execute('SELECT * FROM comments WHERE model_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?', (job['id'], limit, offset)).fetchall()
@@ -446,14 +454,14 @@ class Community:
 
     async def add_comment(self, request):
         account = self.account(request)
-        job = self.public_model(request)
+        job = self.comment_model(request)
         self.limit('comment-minute', account['id'], 8, 60)
         self.limit('comment-hour', account['id'], 60, 3600)
         data = await self.studio.json_object(request)
         if set(data) != {'body'}:
             raise web.HTTPBadRequest(text='Нужен текст комментария.')
         body = self.text(data['body'], 'Комментарий', 2000, 1)
-        if self.public_model(request) is not job:
+        if self.comment_model(request) is not job:
             raise web.HTTPNotFound(text='Модель удалена.')
         cid = str(uuid.uuid4())
         with self.db:

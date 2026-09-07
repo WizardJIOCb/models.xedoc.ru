@@ -28,7 +28,7 @@ function harness({ shared = true, token = false, motion = null } = {}) {
   const context = vm.createContext({ state, URLSearchParams, isShared: shared,
     publicModelId: token ? null : job.id, shareToken: token ? 'opaque-token' : null,
     document: { hidden: false }, performance: { now: () => 100 }, $: element,
-    rigBusy: () => false, refreshHealth() {},
+    rigBusy: () => false, refreshHealth() {}, refreshMotionLibrary() {},
     setError(id, message) { errors.set(id, message); },
     renderSelection() { context.renderSharedOwnerAccess(); },
     window: { addEventListener(name, callback) { events.set(name, callback); } },

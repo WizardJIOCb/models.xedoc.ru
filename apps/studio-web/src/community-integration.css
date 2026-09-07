@@ -3,6 +3,11 @@
 .publication-choice .field-hint { margin-top: 9px; }
 .community-gallery-section { margin-top: 38px; }
 .playground-stage { min-width:0; }
+.playground-layout .playground-stage { align-self:start; }
+.playground-layout.manual-rig-active>.playground-stage,.playground-layout.mesh-edit-active>.playground-stage { position:sticky;top:18px; }
+.manual-rig-active .playground-comments,.mesh-edit-active .playground-comments,.mesh-edit-active #motion-library-status,.manual-rig-active #motion-library-status,.mesh-edit-active #public-model-discussion,.manual-rig-active #public-model-discussion { display:none; }
+.mesh-edit-active .playground-stage .viewer-frame { height:min(594px,calc(100dvh - 100px));min-height:320px; }
+@media(max-width:700px){.playground-layout.manual-rig-active>.playground-stage,.playground-layout.mesh-edit-active>.playground-stage{top:0;z-index:4}.mesh-edit-active .playground-stage .viewer-frame{height:43dvh;min-height:0;max-height:420px}}
 .playground-stage .playground-comments { max-width:none; margin-top:28px; scroll-margin-top:24px; }
 .shared-owner-controls { display:flex; align-items:center; justify-content:space-between; gap:20px; margin:0 0 20px; padding:18px 20px; border:1px solid #2c6269; border-radius:12px; background:#10262b; }
 .shared-owner-controls strong { font-size:14px; color:#d1eeeb; }
