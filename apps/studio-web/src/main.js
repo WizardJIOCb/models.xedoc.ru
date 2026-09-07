@@ -2,7 +2,7 @@ import './style.css';
 import './placement.css';
 import './library-actions.css';
 import './community-integration.css';
-import { mountCommunityHeader, mountGallerySection, renderPublicationPanel } from './community.js';
+import { mountCommunityHeader, mountGallerySection, mountComments, renderPublicationPanel } from './community.js';
 import { renderEnvironmentPanel, getEnvironmentPreview, saveEnvironmentPanel } from './environment-panel.js';
 import { manualRigMarkup, createManualRigPanel } from './manual-rig-panel.js';
 
@@ -54,6 +54,7 @@ const state = {
   sharedCanEdit: false,
   previewUploads: new Set(),
   authRevision: 0,
+  commentsModelId: null, disposeComments: null,
 };
 
 document.title = `${isPlayground ? 'Playground' : 'Генерация 3D-моделей'} · models.xedoc.ru`;
@@ -204,7 +205,9 @@ function generationMarkup() {
 
 function playgroundMarkup() {
   return `<div class="playground-layout">
+    ${publicModelId ? '<div class="playground-stage">' : ''}
     <section class="panel arena-panel" aria-label="Интерактивная арена">${viewerMarkup()}<div class="arena-statebar"><span id="arena-mode"><span class="status-dot"></span> Выбери модель для просмотра</span><span id="arena-fps">WEBGL</span></div></section>
+    ${publicModelId ? '<section id="comments" class="community-comments playground-comments" aria-labelledby="community-comments-heading" hidden></section></div>' : ''}
     <aside class="panel playground-controls">
       <div class="panel-heading"><span class="step-number">01</span><h2>Испытай персонажа</h2></div>
       <div class="playground-content"><div class="selected-model-name" id="playground-model-name">Модель не выбрана</div><p class="field-hint" id="playground-hint">Открой свою модель из библиотеки ниже или начни с демо.</p>
@@ -950,6 +953,18 @@ function renderSharedOwnerAccess() {
   link.href = `/playground?${query}`;
 }
 
+function renderPlaygroundComments(job) {
+  const element = $('comments');
+  if (!element) return;
+  const modelId = !state.demo && publicModelId && job?.id === publicModelId ? job.id : null;
+  element.hidden = !modelId;
+  if (state.commentsModelId === modelId) return;
+  state.disposeComments?.();
+  state.disposeComments = null;
+  state.commentsModelId = modelId;
+  if (modelId) state.disposeComments = mountComments(element, modelId);
+}
+
 function renderSelection() {
   const job = getJob();
   observeRigResult(job);
@@ -961,6 +976,7 @@ function renderSelection() {
   if (signature === state.selectionSignature) return;
   state.selectionSignature = signature;
   renderSharedOwnerAccess();
+  renderPlaygroundComments(job);
   $('view-reference').hidden = !canViewReference(job);
   $('share-model').hidden = isShared || state.demo || job?.status !== 'complete' || !artifactUrl(job);
   renderEnvironmentPanel($('environment-panel'), !isShared && !state.demo ? job : null, {
@@ -978,7 +994,7 @@ function renderSelection() {
   });
   if (isPlayground) {
     $('public-model-discussion').hidden = !job || (!publicModelId && job.visibility !== 'public');
-    $('public-model-discussion').href = job ? `/model/${encodeURIComponent(job.id)}` : '/gallery';
+    $('public-model-discussion').href = job ? publicModelId ? '#comments' : `/model/${encodeURIComponent(job.id)}#comments` : '/gallery';
     $('playground-model-name').textContent = state.demo ? 'Doom Slayer · демо' : job ? jobTitle(job) : 'Модель не выбрана';
     $('playground-hint').textContent = state.demo ? 'Скелетный персонаж из предыдущей генерации. Анимация переключается на физику при ударе.' : job ? preparingRig(job) ? 'Выровняй персонажа, затем создай скелет для движения и ragdoll.' : hasRig(job) ? 'Скелет готов. Испытай движение и реакцию на удар.' : 'После создания модели здесь можно подготовить персонажа к анимации.' : 'Открой свою модель из библиотеки ниже или начни с демо.';
     $('back-to-model').href = job ? `/generate-model?job=${encodeURIComponent(job.id)}` : '/generate-model';

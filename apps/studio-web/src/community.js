@@ -589,17 +589,19 @@ async function mountModelPage(page, id) {
   }
 }
 
-function mountComments(element, modelId) {
+export function mountComments(element, modelId) {
   let offset = 0;
   let total = 0;
   let sequence = 0;
   let sending = false;
   let messageDraft = '';
+  let disposed = false;
   element.innerHTML = `<div class="section-heading"><div><div class="eyebrow">ИДЕИ СТАНОВЯТСЯ ЛУЧШЕ ВМЕСТЕ</div><h2 id="community-comments-heading">Комментарии <span class="count" data-comments-total>0</span></h2></div></div><div class="community-comment-composer"></div><div class="community-comments-status" role="status"></div><div class="community-comment-list"></div><button class="button button-quiet" type="button" data-more-comments hidden>Ещё комментарии</button>`;
   const list = element.querySelector('.community-comment-list');
   const status = element.querySelector('.community-comments-status');
   const more = element.querySelector('[data-more-comments]');
   function renderComposer() {
+    if (disposed) return;
     const composer = element.querySelector('.community-comment-composer');
     messageDraft = composer.querySelector('textarea')?.value ?? messageDraft;
     if (!currentUser) {
@@ -625,6 +627,7 @@ function mountComments(element, modelId) {
       error.hidden = true;
       try {
         await request(`/models/${encodeURIComponent(modelId)}/comments`, { method: 'POST', body: { body } });
+        if (disposed) return;
         form.elements.body.value = ''; messageDraft = '';
         await refresh();
         notify('Комментарий добавлен.');
@@ -633,6 +636,7 @@ function mountComments(element, modelId) {
     });
   }
   async function refresh(append = false) {
+    if (disposed) return;
     const requestId = ++sequence;
     if (!append) offset = 0;
     status.textContent = 'Загружаем комментарии…';
@@ -666,9 +670,16 @@ function mountComments(element, modelId) {
     catch (error) { const message = article.querySelector('[role=alert]'); message.textContent = error.message; message.hidden = false; confirmation.querySelectorAll('button').forEach((control) => { control.disabled = false; }); }
   });
   more.addEventListener('click', () => refresh(offset > 0));
-  window.addEventListener('community:auth-changed', () => { renderComposer(); refresh(); });
+  const onAuthChanged = () => { renderComposer(); refresh(); };
+  window.addEventListener('community:auth-changed', onAuthChanged);
   loadAuth().then(renderComposer).catch(renderComposer);
   refresh();
+  return () => {
+    disposed = true;
+    sequence++;
+    window.removeEventListener('community:auth-changed', onAuthChanged);
+    element.replaceChildren();
+  };
 }
 
 export async function mountCommunityPage() {
