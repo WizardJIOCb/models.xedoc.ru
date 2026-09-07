@@ -32,6 +32,18 @@ assert.match(elements.get('playground-motion').innerHTML,/value="library:missing
 state.selectedMotion='own';
 assert.equal(context.selectedUrl(job),'/own.glb');
 
+const unrigged = {...job, rig:{available:false}, artifacts:{modelUrl:'/source.glb'}, motions:[]};
+state.selectedMotion='base';
+context.renderMotions(unrigged);
+assert.equal(elements.get('playground-motion').disabled,false,'The library can be browsed before rigging');
+assert.match(elements.get('playground-motion').innerHTML,/value="library:abcd" disabled/);
+assert.match(elements.get('motion-library-status').textContent,/после создания скелета/);
+assert.equal(elements.get('motion-library-status').hidden,false);
+state.selectedMotion='library:abcd';
+assert.equal(context.selectedMotion(unrigged),undefined,'Do not construct a motion URL before a rig exists');
+context.renderMotions(job);
+assert.equal(elements.get('playground-motion').innerHTML.includes('value="library:abcd" disabled'),false,'A completed rig unlocks playback');
+
 context.renderPlaygroundComments(job);
 context.renderPlaygroundComments(job);
 assert.deepEqual(mounted,['one'],'Polling must keep the composer and its draft');

@@ -13,7 +13,7 @@ from pathlib import Path
 import bpy
 import numpy as np
 from mathutils import Vector
-from pose_geometry import triangulate_joint
+from pose_geometry import align_frontal_landmarks, triangulate_joint
 
 POSE_PYTHON = Path(os.environ.get('STUDIO_POSE_PYTHON', r'C:\Projects\models-studio-tools\pose\.venv\Scripts\python.exe'))
 POSE_MODEL = Path(os.environ.get('STUDIO_POSE_MODEL', r'C:\Projects\models-studio-models\Pose\pose_landmarker_heavy.task'))
@@ -89,12 +89,19 @@ def fit_posed(mesh, points, output):
     detections = json.loads(result_path.read_text(encoding='utf-8'))
     required = (11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
     good = []
+    aligned_views = []
     for view, detection in zip(views, detections):
         landmarks = detection['landmarks']
         if not landmarks:
             continue
         confidence = np.mean([min(landmarks[i]['visibility'], landmarks[i]['presence']) for i in required])
         if confidence > 0.65:
+            try:
+                landmarks, swapped = align_frontal_landmarks(landmarks, view)
+            except ValueError:
+                continue
+            if swapped:
+                aligned_views.append(Path(view['image']).name)
             good.append((view, landmarks))
     if len(good) < 3:
         raise ValueError('Не удалось уверенно распознать обе руки и ноги. Поверните модель лицом вперёд; нужен человек в полный рост.')
@@ -136,7 +143,7 @@ def fit_posed(mesh, points, output):
         raise ValueError('Скелет рассчитан на стоящего человека. Исправьте наклон модели перед созданием скелета.')
     # Anatomical left is +X in our export and in the SMPL-X mapping.
     if joints[11][0] <= joints[12][0]:
-        raise ValueError('Модель повёрнута спиной. Разверните её на 180° вокруг вертикальной оси Y.')
+        raise ValueError('Не удалось согласовать левую и правую стороны тела. Проверьте вид спереди или расставьте суставы вручную.')
     spine = pelvis + (shoulders - pelvis) * 0.32
     chest = pelvis + (shoulders - pelvis) * 0.72
     neck = shoulders + (ears - shoulders) * 0.4
@@ -163,6 +170,7 @@ def fit_posed(mesh, points, output):
             f'Foot_{side}': (ankle, toe, f'LowerLeg_{side}')})
     diagnostics = {'method': 'MediaPipe Heavy landmarks triangulated from textured mesh renders',
         'automatic_semantic_recognition': True, 'valid_views': len(good),
+        'left_right_aligned_views': aligned_views,
         'joint_view_consensus': joint_views,
         'max_projection_error_m': max(errors), 'landmarks_blender': {str(k): v.tolist() for k, v in joints.items()},
         'input_requirements': 'One upright full-body human, facing +Z, complete separated limbs'}

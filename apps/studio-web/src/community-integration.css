@@ -6,7 +6,6 @@
 .playground-layout .playground-stage { align-self:start; }
 .playground-layout.manual-rig-active>.playground-stage,.playground-layout.mesh-edit-active>.playground-stage { position:sticky;top:min(18px,calc(100dvh - var(--stage-height, 0px) - 18px)); }
 .playground-layout.manual-rig-active .playground-stage>.arena-panel { position:static; }
-.mesh-edit-active #motion-library-status,.manual-rig-active #motion-library-status { display:none; }
 .mesh-edit-active .playground-stage .viewer-frame { height:min(594px,calc(100dvh - 100px));min-height:320px; }
 @media(max-width:700px){.playground-layout.manual-rig-active>.playground-stage,.playground-layout.mesh-edit-active>.playground-stage{position:static}.mesh-edit-active .playground-stage .viewer-frame{height:43dvh;min-height:0;max-height:420px}}
 .playground-stage .playground-comments { max-width:none; margin-top:28px; scroll-margin-top:24px; }

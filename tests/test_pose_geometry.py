@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from pose_geometry import triangulate_joint
+from pose_geometry import align_frontal_landmarks, triangulate_joint
 
 
 def cameras(point, angles=(0, -35, 35, -17.5, 17.5, -50, 50)):
@@ -18,6 +18,40 @@ def cameras(point, angles=(0, -35, 35, -17.5, 17.5, -50, 50)):
 
 
 class PoseGeometryTests(unittest.TestCase):
+    def test_adjacent_views_with_flipped_labels_recover_the_same_limb(self):
+        left = np.array([0.3, -0.1, 1.5])
+        right = np.array([-0.3, -0.1, 1.5])
+        observations = []
+        for index, camera in enumerate(cameras(left)):
+            a, b = camera['basis'] @ left, camera['basis'] @ right
+            points = [dict(x=0.5, y=0.5, visibility=0.98, presence=0.98) for _ in range(33)]
+            for li, ri in ((11, 12), (23, 24)):
+                points[li]['x'], points[ri]['x'] = 0.5 + a[0] / 2.45, 0.5 + b[0] / 2.45
+                points[li]['y'] = points[ri]['y'] = 0.5 - (a[1] - 1) / 2.45
+            flipped = index in (0, 1, 2, 4, 5)
+            if flipped:
+                for li, ri in ((11, 12), (23, 24)):
+                    points[li], points[ri] = points[ri], points[li]
+            before = [dict(p) for p in points]
+            aligned, swapped = align_frontal_landmarks(points, {'right': camera['basis'][0]})
+            self.assertEqual(swapped, flipped)
+            self.assertEqual(points, before, 'Keep raw detector evidence intact')
+            point = aligned[11]
+            observations.append({**camera, 'target': [(point['x'] - 0.5) * 2.45, (0.5 - point['y']) * 2.45 + 1]})
+        location, report = triangulate_joint(observations)
+        np.testing.assert_allclose(location, left, atol=1e-7)
+        self.assertEqual(len(report['inliers']), 7)
+
+    def test_ambiguous_torso_or_rear_camera_is_not_silently_relabelled(self):
+        points = [dict(x=0.5) for _ in range(33)]
+        for li, ri in ((11, 12), (23, 24)):
+            points[li]['x'], points[ri]['x'] = 0.6, 0.4
+        with self.assertRaises(ValueError):
+            align_frontal_landmarks(points, {'right': [-1, 0, 0]})
+        points[23]['x'], points[24]['x'] = 0.4, 0.6
+        with self.assertRaises(ValueError):
+            align_frontal_landmarks(points, {'right': [1, 0, 0]})
+
     def test_confident_false_knee_on_upper_body_does_not_move_joint(self):
         point = np.array([0.28, -0.1, 0.6])
         observations = cameras(point)

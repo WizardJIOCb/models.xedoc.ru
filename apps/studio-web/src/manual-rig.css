@@ -29,5 +29,5 @@
 #manual-stale .button{display:block;margin-top:9px;white-space:normal}
 .manual-rig-active .arena-panel{align-self:start;position:sticky;top:18px}
 .manual-rig-active .viewer-frame{cursor:crosshair}
-.manual-rig-active .playground-content>.arena-buttons,.manual-rig-active .playground-content>.range-heading,.manual-rig-active #power,.manual-rig-active .toggle-controls,.manual-rig-active .arena-metrics,.manual-rig-active .playground-note,.manual-rig-active label[for=playground-motion],.manual-rig-active #playground-motion,.manual-rig-active #placement-panel{display:none}
+.manual-rig-active .playground-content>.arena-buttons,.manual-rig-active .playground-content>.range-heading,.manual-rig-active #power,.manual-rig-active .toggle-controls,.manual-rig-active .arena-metrics,.manual-rig-active .playground-note,.manual-rig-active #placement-panel{display:none}
 @media(max-width:700px){.manual-rig-active .arena-panel{top:0;z-index:4}.manual-rig-active .arena-panel .viewer-frame{height:43vh;min-height:260px;max-height:420px}.manual-views .button{font-size:11px;min-height:36px}.manual-help,.manual-joint-hint,.manual-feedback,.manual-review{font-size:12px}#manual-joint{font-size:13px}.manual-all-points>div{max-height:250px}.manual-all-points button{font-size:12px;padding:8px}}

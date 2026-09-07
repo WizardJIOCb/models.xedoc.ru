@@ -230,12 +230,12 @@ function playgroundMarkup() {
     <aside class="panel playground-controls">
       <div class="panel-heading"><span class="step-number">01</span><h2>Испытай персонажа</h2></div>
       <div class="playground-content"><div class="selected-model-name" id="playground-model-name">Модель не выбрана</div><p class="field-hint" id="playground-hint">Открой свою модель из библиотеки ниже или начни с демо.</p>
+        <label class="field-label" for="playground-motion">Движение</label><select id="playground-motion" disabled><option value="">Исходная модель</option></select>
+        <p id="motion-library-status" class="field-hint" role="status" hidden></p>
         <div id="mesh-edit-panel" hidden></div>
         ${rigPreparationMarkup()}
         ${placementMarkup()}
         <div id="environment-panel" hidden></div>
-        <label class="field-label" for="playground-motion">Движение</label><select id="playground-motion" disabled><option value="">Исходная модель</option></select>
-        <p id="motion-library-status" class="field-hint" role="status" hidden></p>
         <div class="arena-buttons"><button class="button button-primary" id="strike" disabled>${icon('zap')}Нанести удар<kbd>Space</kbd></button><button class="button button-secondary" id="reset" disabled>${icon('reset')}Восстановить<kbd>R</kbd></button></div>
         <label class="range-heading" for="power">Сила удара <output id="power-value">5 / 10</output></label><input id="power" type="range" min="1" max="10" value="5" disabled />
         <div class="toggle-controls"><button class="toggle-button" id="slow" aria-pressed="false" disabled><span>Замедление <kbd>T</kbd></span><span class="switch"></span></button><button class="toggle-button" id="physics" aria-pressed="false" disabled><span>Показать скелет</span><span class="switch"></span></button><button class="toggle-button" id="pause" aria-pressed="false" disabled><span>Пауза анимации</span><span class="switch"></span></button></div>
@@ -290,7 +290,7 @@ function stageText(stage, fallback = '') { return stageLabels[stage] || stage ||
 function artifactUrl(job) { return job?.artifacts?.riggedUrl || job?.artifacts?.modelUrl; }
 function libraryMotions(job) {
   const prefix = job?.artifacts?.motionLibraryUrl;
-  return prefix ? (state.motionLibrary || []).map((motion) => ({ ...motion, id: `library:${motion.id}`, status: 'complete', glbUrl: `${prefix}${encodeURIComponent(motion.id)}/animated.glb` })) : [];
+  return (state.motionLibrary || []).map((motion) => ({ ...motion, id: `library:${motion.id}`, status: 'complete', glbUrl: prefix ? `${prefix}${encodeURIComponent(motion.id)}/animated.glb` : undefined }));
 }
 function selectedMotion(job) { return [...(job?.motions || []), ...libraryMotions(job)].find((motion) => motion.id === state.selectedMotion && motion.status === 'complete' && motion.glbUrl); }
 function selectedUrl(job) {
@@ -959,12 +959,13 @@ async function revokeShare() {
 function renderMotions(job) {
   const motions = job?.motions || [];
   const library = libraryMotions(job);
-  const signature = JSON.stringify([motions, library, state.selectedMotion, sourceView(job), hasRig(job), state.motionLibraryReady, state.motionLibraryError]);
+  const signature = JSON.stringify([motions, library, state.selectedMotion, sourceView(job), editingMesh(job), hasRig(job), state.motionLibraryReady, state.motionLibraryError]);
   if (signature === state.motionSignature) return;
   state.motionSignature = signature;
   if (isPlayground) {
     const select = $('playground-motion');
-    const options = (items) => items.map((motion) => `<option value="${escape(motion.id)}">${escape(motion.prompt || 'Движение')} · ${Math.round(motion.frames / (motion.fps || 30))} с</option>`).join('');
+    const canPlay = !editingMesh(job) && !sourceView(job) && hasRig(job);
+    const options = (items) => items.map((motion) => `<option value="${escape(motion.id)}"${canPlay && motion.glbUrl ? '' : ' disabled'}>${escape(motion.prompt || 'Движение')} · ${Math.round(motion.frames / (motion.fps || 30))} с</option>`).join('');
     const own = motions.filter((motion) => motion.status === 'complete' && motion.glbUrl);
     const unavailable = state.motionLibraryReady && state.selectedMotion?.startsWith('library:') && !library.some((motion) => motion.id === state.selectedMotion);
     select.innerHTML = `<option value="">${hasRig(job) || state.demo ? 'Ходьба по кругу' : 'Исходная модель'}</option>` +
@@ -972,10 +973,10 @@ function renderMotions(job) {
       (library.length ? `<optgroup label="Готовые движения">${options(library)}</optgroup>` : '') +
       (own.length ? `<optgroup label="Движения этой модели">${options(own)}</optgroup>` : '');
     select.value = state.selectedMotion === 'base' ? '' : state.selectedMotion || '';
-    select.disabled = editingMesh(job) || sourceView(job) || !hasRig(job) || !(own.length || library.length);
+    select.disabled = !job || !(own.length || library.length);
     const notice = $('motion-library-status');
-    notice.textContent = state.motionLibraryError || (!state.motionLibraryReady ? 'Загружаем готовые движения…' : library.length ? 'Первое открытие подготавливает движение для этой модели. Затем используется сохранённая версия.' : 'Готовых движений пока нет.');
-    notice.hidden = !hasRig(job) || editingMesh(job);
+    notice.textContent = state.motionLibraryError || (!state.motionLibraryReady ? 'Загружаем готовые движения…' : !hasRig(job) ? 'Движения доступны после создания скелета. Подготовь персонажа ниже — список включится автоматически.' : !canPlay ? 'Заверши редактирование, чтобы воспроизвести движение.' : library.length ? 'Первое открытие подготавливает движение для этой модели. Затем используется сохранённая версия.' : 'Готовых движений пока нет.');
+    notice.hidden = !job;
   } else {
     $('motions-list').innerHTML = motions.map((motion) => `<div class="motion-row ${state.selectedMotion === motion.id ? 'selected' : ''}"><div class="motion-icon">${icon(motion.status === 'complete' ? 'play' : motion.status === 'failed' ? 'close' : 'reset')}</div><div class="motion-info"><strong>${escape(motion.prompt || 'Движение')}</strong><span>${motion.status === 'complete' ? `${Math.round((motion.frames || 150) / (motion.fps || 30))} с · готово` : escape(motion.status === 'failed' ? motion.error || 'Ошибка генерации' : stageText(motion.stage, 'В очереди'))}</span></div>${motion.status === 'complete' && motion.glbUrl ? `<button class="icon-button ${state.selectedMotion === motion.id ? 'active' : ''}" data-motion="${escape(motion.id)}" title="Посмотреть анимацию" aria-label="Посмотреть анимацию">${icon('play')}</button><a class="icon-button" href="${escape(motion.glbUrl)}" download title="Скачать GLB с анимацией" aria-label="Скачать GLB с анимацией">${icon('download')}</a>` : ''}</div>`).join('');
   }
