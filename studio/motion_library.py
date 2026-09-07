@@ -10,6 +10,13 @@ from aiohttp import web
 SOURCE_ID = re.compile(r'^[a-f0-9]{16}$')
 REVISION = r'(?:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|legacy)'
 ARTIFACT = re.compile(rf'^library/({REVISION})/([a-f0-9]{{16}})/animated\.glb$')
+# The eight existing motions requested for the shared playground library.
+# Importing these motions does not publish their source model or image.
+# Future private Studio motions still follow their owner's access boundary.
+SHARED_PRESETS = frozenset({
+    '04c476c0b516a5a6', 'ec63c4222c823931', 'a476c3fb8177fdc2', 'bdab62f6afe05c0c',
+    'ccbe5ef9f0e32f26', '7f3552f09bd8b511', '15a37223c9e27c6f', '6d58209c84685f6b',
+})
 
 
 def prefix(job, file_prefix):
@@ -59,7 +66,7 @@ class MotionLibrary:
             if not self.studio.community.is_public(job) and not self.studio.community.owns(request, job):
                 restricted.update(m.get('_kimodoId') for m in job.get('motions', []))
                 restricted.update(m.get('_kimodoId') for m in job.get('_meshOriginal', {}).get('motions', []))
-        return [dict(row) for row in self.cached if row['id'] not in restricted]
+        return [dict(row) for row in self.cached if row['id'] in SHARED_PRESETS or row['id'] not in restricted]
 
     async def catalog(self, request):
         return web.json_response({'motions': await self.entries(request)})

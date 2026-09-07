@@ -11,7 +11,7 @@ import test_studio
 import test_community
 
 server = test_studio.server
-SID = '04c476c0b516a5a6'
+SID = 'eeeeeeeeeeeeeeee'
 ROW = {'id': SID, 'prompt': 'Walk then stop', 'frames': 90, 'created_at': '2026-09-07', 'model': 'smplx-rp-v1', 'status': 'ready'}
 
 
@@ -83,6 +83,14 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['motions'], [])
         self.assertEqual(len((await (await self.client.get(url)).json())['motions']), 1)
         self.assertEqual(self.history_calls, 1)
+
+    async def test_requested_presets_can_be_reused_without_publishing_the_source_model(self):
+        preset = '04c476c0b516a5a6'
+        self.history.append({**ROW, 'id': preset})
+        self.job.update(visibility='private', motions=[{'id': 'preset', '_kimodoId': preset, 'status': 'complete'}])
+        result = await (await self.outsider.get(self.client.make_url('/api/model-studio/motion-library'))).json()
+        self.assertIn(preset, [m['id'] for m in result['motions']])
+        self.assertEqual((await self.outsider.get(self.client.make_url(f"/api/model-studio/models/{self.job['id']}"))).status, 404)
 
     async def test_concurrent_cache_shared_public_owner_and_etag(self):
         self.resume.clear()
