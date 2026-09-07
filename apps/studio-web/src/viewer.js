@@ -429,6 +429,17 @@ export function createViewer({ container, playground = false, onState = () => {}
   });
   return {
     load, hit, reset, resetCamera, frontView, setPosition, placeOnFloor,
+    capturePreview() {
+      if (!ready || disposed || !canvas.width || !canvas.height) return null;
+      renderer.render(scene, camera);
+      const preview = document.createElement('canvas');
+      const factor = Math.min(640 / canvas.width, 480 / canvas.height, 1);
+      preview.width = Math.max(1, Math.round(canvas.width * factor));
+      preview.height = Math.max(1, Math.round(canvas.height * factor));
+      // Copy the freshly rendered frame before WebGL discards its draw buffer.
+      preview.getContext('2d').drawImage(canvas, 0, 0, preview.width, preview.height);
+      return preview.toDataURL('image/webp', 0.86);
+    },
     setOrientation(rotation) { const changed = applyPreviewRotation(rotation); if (changed) emit(); return changed; },
     setPower(value) { power = Math.max(1, Math.min(10, Number(value))); },
     setSlow(value) { slow = Boolean(value); emit(); },

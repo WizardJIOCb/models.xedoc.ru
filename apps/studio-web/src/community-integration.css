@@ -1,0 +1,4 @@
+.publication-choice > label { display: flex; align-items: center; gap: 10px; color: var(--text, #dceaf1); font-size: 12px; font-weight: 600; cursor: pointer; }
+.publication-choice input[type="checkbox"] { width: 18px; height: 18px; margin: 0; flex: 0 0 auto; accent-color: #35cacc; cursor: pointer; }
+.publication-choice .field-hint { margin-top: 9px; }
+.community-gallery-section { margin-top: 38px; }

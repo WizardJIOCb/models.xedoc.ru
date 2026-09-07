@@ -1,12 +1,15 @@
 import './style.css';
 import './placement.css';
 import './library-actions.css';
+import './community-integration.css';
+import { mountCommunityHeader, mountGallerySection, renderPublicationPanel } from './community.js';
 
 const API = '/api/model-studio';
 const settingsClientId = crypto.randomUUID();
 const params = new URLSearchParams(location.search);
 const shareToken = params.get('share');
-const isShared = Boolean(shareToken);
+const publicModelId = params.get('model');
+const isShared = Boolean(shareToken || publicModelId);
 const isPlayground = isShared || location.pathname.replace(/\/$/, '') === '/playground';
 const $ = (id) => document.getElementById(id);
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -46,6 +49,8 @@ const state = {
   placementDrafts: new Map(),
   deleteTargets: [], deleting: false, deletedIds: new Set(),
   sharing: false,
+  previewUploads: new Set(),
+  authRevision: 0,
 };
 
 document.title = `${isPlayground ? 'Playground' : 'Генерация 3D-моделей'} · models.xedoc.ru`;
@@ -72,6 +77,7 @@ $('app').innerHTML = `
     <p class="shared-note" id="shared-note" ${isShared ? '' : 'hidden'}>Модель по ссылке · просмотр и playground. Изменения владельца сохраняются автоматически.</p>
     <div id="shared-error" class="inline-error" role="alert" hidden></div>
     ${isPlayground ? playgroundMarkup() : generationMarkup()}
+    ${!isPlayground && !isShared ? '<section id="community-gallery" class="community-gallery-section" aria-label="Галерея сообщества"></section>' : ''}
     <section class="library-section" aria-labelledby="library-title" ${isShared ? 'hidden' : ''}>
       <div class="section-heading"><div><h2 id="library-title">Твоя библиотека <span class="count" id="jobs-count">0</span></h2><p>Модели и движения сохраняются после завершения.</p></div><div class="library-actions"><button class="button button-quiet button-small delete-failed-button" id="delete-failed" hidden>${icon('trash')}Удалить с ошибками</button><button class="button button-quiet button-small" id="refresh-jobs">${icon('reset')}Обновить</button></div></div>
       <div id="library-error" class="inline-error" role="alert" hidden></div>
@@ -142,6 +148,7 @@ function generationMarkup() {
         <div class="field-group"><div class="field-label">Качество</div>
           <div class="quality-options" role="group" aria-label="Качество модели"><button type="button" class="quality-option active" data-quality="standard" aria-pressed="true"><span>Стандарт</span><small>Текстуры 2K</small><span class="selection-dot"></span></button><button type="button" class="quality-option" data-quality="high" aria-pressed="false"><span>Высокое</span><small>Текстуры 4K</small><span class="selection-dot"></span></button></div>
         </div>
+        <div class="field-group publication-choice"><label><input type="checkbox" id="publish-new-model" checked /> Публиковать в галерее</label><p class="field-hint">Готовая 3D-модель будет видна всем. Исходная картинка остаётся приватной. Сними галочку, чтобы сделать модель приватной.</p></div>
         <div id="form-error" class="inline-error" role="alert" hidden></div>
         <button class="button button-primary generate-button" id="generate-button" type="submit" disabled>${icon('zap')}<span>Создать 3D-модель</span>${icon('arrow')}</button>
         <p class="submit-note" id="submit-note">Загрузи изображение, чтобы начать.</p>
@@ -154,6 +161,7 @@ function generationMarkup() {
         <div class="job-progress" id="job-progress" hidden><div class="progress-top"><span class="small-loader"></span><strong id="job-stage"></strong><span id="job-percent"></span></div><div class="progress-track"><span id="job-progress-fill"></span></div><p id="job-progress-note">Можно закрыть страницу: задача продолжит выполняться на компьютере.</p></div>
         <div class="result-error" id="result-error" role="alert" hidden><strong>Не удалось создать модель</strong><p id="result-error-message"></p><button class="button button-secondary button-small" id="retry-generation">Попробовать с теми же настройками</button></div>
         <div class="result-actions" id="result-actions" hidden><a class="button button-secondary" id="download-model" download>${icon('download')}<span>Скачать GLB</span></a><a class="button button-primary" id="open-playground" href="/playground">${icon('play')}В playground</a><button class="button button-quiet reference-control" id="view-reference" type="button" hidden>${icon('image')}Посмотреть референс</button><button class="icon-button" id="share-model" title="Поделиться моделью" aria-label="Поделиться моделью" hidden>${icon('share')}</button><button class="icon-button" id="reset-camera" title="Вернуть камеру" aria-label="Вернуть камеру">${icon('reset')}</button></div>
+        <div id="publication-panel" hidden></div>
       </div>
       <section class="panel animation-panel" id="animation-panel" aria-labelledby="animation-title">
         <div class="panel-heading"><span class="step-number">03</span><h2 id="animation-title">Добавь движение</h2><span class="small-tag">SMPL-X RP v1</span></div>
@@ -191,6 +199,8 @@ function playgroundMarkup() {
         <a class="button button-secondary full-width" id="playground-download" download hidden>${icon('download')}Скачать GLB</a>
         <button class="button button-quiet full-width reference-control" id="view-reference" type="button" hidden>${icon('image')}Посмотреть референс</button>
         <button class="button button-secondary full-width share-control" id="share-model" type="button" hidden>${icon('share')}Поделиться моделью</button>
+        <a class="button button-quiet full-width" id="public-model-discussion" hidden>Комментарии к модели</a>
+        <div id="publication-panel" hidden></div>
       </div>
     </aside>
   </div>`;
@@ -263,7 +273,7 @@ function rigDraft(job) {
 }
 function setError(id, error) { const element = $(id); if (!element) return; element.textContent = error || ''; element.hidden = !error; }
 function shortDate(value) { const date = new Date(value); return Number.isNaN(date.valueOf()) ? '' : new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date); }
-function jobTitle(job) { return job?.name || job?.originalFilename || job?.sourceFilename || `Модель ${String(job?.id || '').slice(0, 6)}`; }
+function jobTitle(job) { return job?.title || job?.name || job?.originalFilename || job?.sourceFilename || `Модель ${String(job?.id || '').slice(0, 6)}`; }
 function jobProgress(job) { return Math.max(0, Math.min(100, Math.round(Number(job?.progress) || 0))); }
 function rigErrorText(error) {
   const text = String(error || '');
@@ -853,11 +863,38 @@ async function loadSelectedViewer(force = false) {
     // Source models open with the same camera on owner and shared playgrounds.
     if (isPlayground && sourceView(job)) viewer.frontView();
     if (isPlayground) ['slow', 'physics', 'pause'].forEach((id) => $(id).setAttribute('aria-pressed', 'false'));
+    if (!isShared && !state.demo && job?.status === 'complete' && !job.previewUrl) void saveModelPreview(job, requestId);
   } catch (error) {
     if (requestId !== state.viewerRequest) return;
     $('viewer-loading').hidden = true;
     $('viewer-error').hidden = false;
     $('viewer-error-text').textContent = error.message;
+  }
+}
+
+function receiveOwnerJob(updated) {
+  if (!updated?.id) return;
+  const index = state.jobs.findIndex((job) => job.id === updated.id);
+  if (index >= 0 && String(updated.updatedAt || '') < String(state.jobs[index].updatedAt || '')) return;
+  if (index >= 0) state.jobs[index] = updated;
+  state.selectionSignature = '';
+  renderJobs();
+  renderSelection();
+  window.dispatchEvent(new CustomEvent('community:models-changed'));
+}
+
+async function saveModelPreview(job, requestId) {
+  if (state.previewUploads.has(job.id) || requestId !== state.viewerRequest) return;
+  state.previewUploads.add(job.id);
+  try {
+    const image = state.viewer?.capturePreview();
+    if (!image || requestId !== state.viewerRequest) return;
+    const response = await request(`/jobs/${encodeURIComponent(job.id)}/preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image }),
+    });
+    receiveOwnerJob(response.job || response);
+  } catch {
+    // The gallery can show its fallback until the owner retries or reloads.
   }
 }
 
@@ -873,7 +910,12 @@ function renderSelection() {
   state.selectionSignature = signature;
   $('view-reference').hidden = !canViewReference(job);
   $('share-model').hidden = isShared || state.demo || job?.status !== 'complete' || !artifactUrl(job);
+  renderPublicationPanel($('publication-panel'), !isShared && !state.demo ? job : null, {
+    onUpdated: receiveOwnerJob, capturePreview: async () => state.viewer?.capturePreview() || null,
+  });
   if (isPlayground) {
+    $('public-model-discussion').hidden = !job || (!publicModelId && job.visibility !== 'public');
+    $('public-model-discussion').href = job ? `/model/${encodeURIComponent(job.id)}` : '/gallery';
     $('playground-model-name').textContent = state.demo ? 'Doom Slayer · демо' : job ? jobTitle(job) : 'Модель не выбрана';
     $('playground-hint').textContent = state.demo ? 'Скелетный персонаж из предыдущей генерации. Анимация переключается на физику при ударе.' : job ? preparingRig(job) ? 'Выровняй персонажа, затем создай скелет для движения и ragdoll.' : hasRig(job) ? 'Скелет готов. Испытай движение и реакцию на удар.' : 'После создания модели здесь можно подготовить персонажа к анимации.' : 'Открой свою модель из библиотеки ниже или начни с демо.';
     $('back-to-model').href = job ? `/generate-model?job=${encodeURIComponent(job.id)}` : '/generate-model';
@@ -927,7 +969,7 @@ function selectJob(id, { retainMotion = false } = {}) {
   if (!retainMotion) state.selectedMotion = null;
   state.demo = false;
   if (!isShared) localStorage.setItem('model-studio-selected', id);
-  const query = new URLSearchParams(isShared ? { share: shareToken } : { job: id });
+  const query = new URLSearchParams(publicModelId ? { model: publicModelId } : isShared ? { share: shareToken } : { job: id });
   if (state.selectedMotion) query.set('motion', state.selectedMotion);
   history.replaceState(null, '', `${isPlayground ? '/playground' : '/generate-model'}?${query}`);
   renderJobs();
@@ -954,11 +996,12 @@ async function poll(force = false) {
   const active = state.jobs.some((job) => ['queued', 'running'].includes(job.status) || rigBusy(job) || job.motions?.some((motion) => ['queued', 'running'].includes(motion.status)));
   if (state.polling || (document.hidden && !force && !active && performance.now() - state.jobsTime < 15000)) return;
   state.polling = true;
+  const authRevision = state.authRevision;
   state.jobsTime = performance.now();
   refreshHealth(force);
   if (isShared) {
     try {
-      const result = await request(`/shares/${encodeURIComponent(shareToken)}`);
+      const result = await request(publicModelId ? `/models/${encodeURIComponent(publicModelId)}` : `/shares/${encodeURIComponent(shareToken)}`);
       state.jobs = [result.job];
       state.selectedId = result.job.id;
       setError('shared-error', null);
@@ -973,6 +1016,7 @@ async function poll(force = false) {
   }
   try {
     const tasks = [request('/jobs').then(async (result) => {
+      if (authRevision !== state.authRevision) return;
       state.jobs = (Array.isArray(result) ? result : result.jobs || []).filter((job) => !state.deletedIds.has(job.id)).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
       state.jobsError = null;
       if (state.selectedId && !getJob()) {
@@ -1034,6 +1078,7 @@ async function submitGeneration(event) {
     form.set('mode', state.mode);
     form.set('quality', state.quality);
     form.set('seed', String(crypto.getRandomValues(new Uint32Array(1))[0]));
+    form.set('visibility', $('publish-new-model').checked ? 'public' : 'private');
     const result = await request('/jobs', { method: 'POST', body: form });
     const job = result.job || result;
     state.jobs = [job, ...state.jobs.filter((item) => item.id !== job.id)];
@@ -1232,6 +1277,24 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) void
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persistSettingsOnExit(); });
 window.addEventListener('pagehide', persistSettingsOnExit);
 window.addEventListener('pagehide', () => { state.viewer?.dispose(); if (state.filePreview) URL.revokeObjectURL(state.filePreview); });
+window.addEventListener('community:auth-changed', () => {
+  if (isShared) return;
+  state.authRevision++;
+  for (const draft of state.placementDrafts.values()) clearTimeout(draft.timer);
+  state.placementDrafts.clear();
+  state.rigDrafts.clear();
+  state.jobs = [];
+  state.selectedId = state.selectedMotion = state.rigEditingId = null;
+  state.selectionSignature = '';
+  state.demo = false;
+  localStorage.removeItem('model-studio-selected');
+  history.replaceState(null, '', isPlayground ? '/playground' : '/generate-model');
+  renderJobs();
+  renderSelection();
+  void poll(true);
+});
+mountCommunityHeader();
+if ($('community-gallery')) mountGallerySection($('community-gallery'), { limit: 8 });
 renderSelection();
 updateHealth();
 void poll(true);

@@ -23,7 +23,9 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(ROOT / 'studio'))
 from pixal_pipeline import ComfyPipeline, glb_summary
+from community import Community
 
 LOG = logging.getLogger('model-studio')
 DATA = ROOT / 'data'
@@ -75,23 +77,27 @@ class Studio:
         self.health_at = 0
         self.legacy_tasks = set()
         self.rates = {}
+        self.community = Community(self, DATA, JOB_ROOT)
 
     def save(self, job):
         job['updatedAt'] = now()
         atomic_json(JOB_ROOT / job['id'] / 'job.json', job)
 
-    def public(self, job):
+    def public(self, job, *, author_cache=None, model_counts=None):
         def clean(value):
             if isinstance(value, dict):
                 return {k: clean(v) for k, v in value.items() if not k.startswith('_')}
             if isinstance(value, list):
                 return [clean(v) for v in value]
             return value
-        return clean(job)
+        result = clean(job)
+        if 'artifacts' in job and 'createdAt' in job:
+            result.update(self.community.owner_fields(job, author_cache, model_counts))
+        return result
 
     def owned(self, request):
         job = self.jobs.get(request.match_info['job_id'])
-        if not job or job['_owner'] != request['session']:
+        if not job or not self.community.owns(request, job):
             raise web.HTTPNotFound(text='Модель не найдена в этой сессии.')
         return job
 
@@ -100,6 +106,7 @@ class Studio:
 
     async def start(self, app):
         JOB_ROOT.mkdir(parents=True, exist_ok=True)
+        self.community.start()
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         for path in sorted(JOB_ROOT.glob('*/job.json')):
             try:
@@ -133,6 +140,7 @@ class Studio:
         for task in self.legacy_tasks:
             task.cancel()
         await self.http.close()
+        self.community.close()
 
     async def request_json(self, method, url, **kwargs):
         async with self.http.request(method, url, **kwargs) as response:
@@ -384,8 +392,9 @@ class Studio:
                                   'rig': {'busy': self.rig_lock.locked(), 'queueLength': self.rig_queue.qsize()}, 'queueLength': self.pending_count()})
 
     async def jobs_list(self, request):
-        rows = sorted((j for j in self.jobs.values() if j['_owner'] == request['session']), key=lambda j: j['createdAt'], reverse=True)
-        return web.json_response({'jobs': [self.public(j) for j in rows[:100]]})
+        rows = sorted((j for j in self.jobs.values() if self.community.owns(request, j)), key=lambda j: j['createdAt'], reverse=True)
+        counts, authors = self.community.public_counts(), {}
+        return web.json_response({'jobs': [self.public(j, author_cache=authors, model_counts=counts) for j in rows[:100]]})
 
     async def job_get(self, request):
         return web.json_response(self.public(self.owned(request)))
@@ -393,7 +402,7 @@ class Studio:
     def limit(self, request):
         if self.pending_count() >= 8:
             raise web.HTTPTooManyRequests(text='Очередь заполнена. Повторите позже.')
-        key = request['session']
+        key = request['account']['id'] if request.get('account') else request['session']
         recent = [t for t in self.rates.get(key, []) if time.monotonic() - t < 60]
         if len(recent) >= 4:
             raise web.HTTPTooManyRequests(text='Подождите минуту перед отправкой новых заданий.')
@@ -413,7 +422,7 @@ class Studio:
         part_count = 0
         async for field in reader:
             part_count += 1
-            if part_count > 4 or isinstance(field, aiohttp.MultipartReader):
+            if part_count > 5 or isinstance(field, aiohttp.MultipartReader):
                 raise web.HTTPBadRequest(text='Слишком много полей формы.')
             if field.name == 'image':
                 if image is not None:
@@ -423,7 +432,7 @@ class Studio:
                     image.extend(chunk)
                     if len(image) > MAX_IMAGE:
                         raise web.HTTPRequestEntityTooLarge(max_size=MAX_IMAGE, actual_size=len(image))
-            elif field.name in ('mode', 'quality', 'seed'):
+            elif field.name in ('mode', 'quality', 'seed', 'visibility'):
                 value = await field.read_chunk(256)
                 if not field.at_eof():
                     raise web.HTTPBadRequest(text='Недопустимый параметр.')
@@ -433,6 +442,9 @@ class Studio:
         if not image:
             raise web.HTTPBadRequest(text='Добавьте изображение PNG, JPEG или WebP.')
         mode, quality = fields.get('mode', 'object'), fields.get('quality', 'standard')
+        visibility = fields.get('visibility', 'public')
+        if visibility not in ('public', 'private'):
+            raise web.HTTPBadRequest(text='Видимость: public или private.')
         if mode not in ('object', 'humanoid') or quality not in ('standard', 'high'):
             raise web.HTTPBadRequest(text='Недопустимый режим генерации.')
         try:
@@ -453,9 +465,12 @@ class Studio:
         folder.mkdir()
         normalized.save(folder / 'input.png')
         job = {'id': jid, '_owner': request['session'], 'kind': 'model', 'mode': mode, 'quality': quality, 'seed': seed,
+               'visibility': visibility,
                'status': 'queued', 'stage': 'В очереди на этом ПК', 'progress': 0, 'createdAt': now(), 'updatedAt': now(),
                'artifacts': {}, 'rig': {'available': False, 'status': 'queued' if mode == 'humanoid' else 'not_requested'}, 'motions': []}
         job['sourceImageUrl'] = self.file_url(job, 'input.png')
+        if request.get('account'):
+            job['_accountId'] = request['account']['id']
         self.jobs[jid] = job
         self.save(job)
         self.queue.put_nowait(('model', jid, None))
@@ -482,6 +497,8 @@ class Studio:
             raise web.HTTPBadRequest(text='Нужны описание движения, длительность 1–10 секунд и корректные параметры.')
         if self.pending_count() >= 8:
             raise web.HTTPTooManyRequests(text='Очередь заполнена. Повторите позже.')
+        if self.owned(request) is not job:
+            raise web.HTTPNotFound(text='Модель удалена.')
         if any(m['status'] in ('queued', 'running') for m in job['motions']):
             raise web.HTTPConflict(text='Анимация для этой модели уже в очереди.')
         if job['rig'].get('status') in ('queued', 'running'):
@@ -513,6 +530,8 @@ class Studio:
             raise web.HTTPBadRequest(text='Углы x, y, z должны быть числами от −180 до 180 градусов.')
         if self.pending_count() >= 8:
             raise web.HTTPTooManyRequests(text='Очередь заполнена. Повторите позже.')
+        if self.owned(request) is not job:
+            raise web.HTTPNotFound(text='Модель удалена.')
         ready()  # Body reads yield: recheck before reserving the operation.
         operation_id = str(uuid.uuid4())
         job['rig'].update(status='queued', stage='В очереди на построение скелета', progress=0,
@@ -592,6 +611,7 @@ class Studio:
             LOG.exception('Could not completely delete job %s', jid)
             raise web.HTTPServiceUnavailable(text='Не удалось полностью удалить файлы модели. Запись сохранена; проверьте занятые файлы и повторите удаление.')
         del self.jobs[jid]
+        self.community.forget_job(jid)
         return web.json_response({'deleted': True, 'id': jid})
 
     async def placement(self, request):
@@ -622,7 +642,7 @@ class Studio:
             except (ValueError, TypeError, AttributeError):
                 raise web.HTTPBadRequest(text='Нужны write.clientId в формате UUID и целая write.revision от 0 до 9007199254740991.')
         # A DELETE may have completed while the request body was being read.
-        if self.jobs.get(job['id']) is not job:
+        if self.jobs.get(job['id']) is not job or not self.community.owns(request, job):
             raise web.HTTPNotFound(text='Модель удалена.')
         writes = None
         if 'write' in data:
@@ -682,9 +702,7 @@ class Studio:
         files.update(f"motions/{motion['id']}/animated.glb" for motion in job.get('motions', []) if motion.get('status') == 'complete')
         return files
 
-    async def share_get(self, request):
-        job, token = self.shared(request)
-        prefix = f'/api/model-studio/shares/{token}/files/'
+    def shared_payload(self, job, prefix, include_prompts=True):
         shared = {key: job[key] for key in ('id', 'title', 'name', 'mode', 'stats', 'placement', 'modelRotation', 'updatedAt') if key in job}
         shared.update(status='complete', stage='Готово', progress=100,
                       artifacts={'modelUrl': prefix + 'model.glb'},
@@ -700,10 +718,15 @@ class Studio:
         for motion in job.get('motions', []):
             if motion.get('status') != 'complete':
                 continue
-            item = {key: motion[key] for key in ('id', 'prompt', 'frames', 'fps', 'model', 'stats', 'rigRevision') if key in motion}
+            keys = ('id', 'frames', 'fps', 'model', 'stats', 'rigRevision') + (('prompt',) if include_prompts else ())
+            item = {key: motion[key] for key in keys if key in motion}
             item.update(status='complete', glbUrl=prefix + f"motions/{motion['id']}/animated.glb")
             shared['motions'].append(item)
-        return web.json_response({'job': shared}, headers={'Cache-Control': 'no-store'})
+        return shared
+
+    async def share_get(self, request):
+        job, token = self.shared(request)
+        return web.json_response({'job': self.shared_payload(job, f'/api/model-studio/shares/{token}/files/')}, headers={'Cache-Control': 'no-store'})
 
     async def share_file(self, request):
         job, token = self.shared(request)
@@ -718,7 +741,7 @@ class Studio:
     async def file(self, request):
         job = self.owned(request)
         name = request.match_info['file']
-        permitted = {'input.png', 'model.glb'} | {f"motions/{m['id']}/animated.glb" for m in job['motions'] if m['status'] == 'complete'}
+        permitted = {'input.png', 'model.glb', 'preview.webp'} | {f"motions/{m['id']}/animated.glb" for m in job['motions'] if m['status'] == 'complete'}
         permitted.update(version['path'] for version in job.get('_rigVersions', []))
         if job['rig'].get('available'):
             permitted.add(job['rig'].get('_path', 'rig/rigged.glb'))
@@ -807,6 +830,7 @@ async def sessions(request, handler):
         if origin and origin not in allowed:
             raise web.HTTPForbidden(text='Недопустимый источник запроса.')
     try:
+        request.app['studio'].community.identify(request)
         response = await handler(request)
     except web.HTTPException as exc:
         response = web.json_response({'error': exc.text or exc.reason}, status=exc.status)
@@ -818,6 +842,8 @@ async def sessions(request, handler):
     if fresh:
         response.set_cookie('model_studio_session', owner, max_age=30 * 86400, httponly=True, samesite='Lax', secure=request.headers.get('X-Forwarded-Proto') == 'https')
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    if request.path.startswith('/api/model-studio'):
+        response.headers['Cache-Control'] = 'no-store'
     return response
 
 
@@ -835,6 +861,7 @@ def create_app():
     app.on_startup.append(studio.start)
     app.on_cleanup.append(studio.stop)
     prefix = '/api/model-studio'
+    app.add_routes(studio.community.routes(prefix))
     app.add_routes([web.get(prefix + '/health', studio.health), web.get(prefix + '/jobs', studio.jobs_list),
                     web.post(prefix + '/jobs', studio.create_job), web.get(prefix + '/jobs/{job_id}', studio.job_get),
                     web.delete(prefix + '/jobs/{job_id}', studio.delete_job),
@@ -848,6 +875,11 @@ def create_app():
                     web.get(prefix + '/demo/glb', studio.demo), web.post('/api/generate', studio.legacy_generate),
                     web.get('/generate-model', index), web.get('/generate-model/', index), web.get('/playground', index),
                     web.get('/playground/', index), web.get('/model-studio/', index), web.get('/', index)])
+    app.add_routes([web.get('/gallery', index), web.get('/gallery/', index),
+                    web.get('/profiles', index), web.get('/profiles/', index),
+                    web.get('/profile', index), web.get('/profile/', index),
+                    web.get('/profile/{username}', index), web.get('/profile/{username}/', index),
+                    web.get('/model/{model_id}', index), web.get('/model/{model_id}/', index)])
     (DIST / 'assets').mkdir(parents=True, exist_ok=True)
     app.router.add_static('/model-studio/assets/', DIST / 'assets', show_index=False)
     return app
