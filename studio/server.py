@@ -809,7 +809,8 @@ class Studio:
 
     async def share_get(self, request):
         job, token = self.shared(request)
-        return web.json_response({'job': self.shared_payload(job, f'/api/model-studio/shares/{token}/files/')}, headers={'Cache-Control': 'no-store'})
+        return web.json_response({'job': self.shared_payload(job, f'/api/model-studio/shares/{token}/files/'),
+                                  'canEdit': self.community.owns(request, job)}, headers={'Cache-Control': 'no-store'})
 
     async def share_file(self, request):
         job, token = self.shared(request)

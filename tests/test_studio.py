@@ -280,6 +280,38 @@ class StudioHTTPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 404)
         saved['motions'][1]['status'] = 'failed'
 
+    async def test_share_edit_entry_tracks_owner_session_and_account_login(self):
+        job = await self.create()
+        link = await (await self.client.post(f"/api/model-studio/jobs/{job['id']}/share")).json()
+        endpoint = '/api/model-studio/shares/' + link['token']
+        owner_response = await self.client.get(endpoint)
+        self.assertEqual(owner_response.status, 200)
+        self.assertEqual(owner_response.headers['Cache-Control'], 'no-store')
+        owner_payload = await owner_response.json()
+        self.assertIs(owner_payload['canEdit'], True)
+        async with self.outsider.get(self.client.make_url(endpoint)) as response:
+            self.assertEqual(response.status, 200)
+            visitor_payload = await response.json()
+        self.assertIs(visitor_payload['canEdit'], False)
+        self.assertEqual(owner_payload['job'], visitor_payload['job'], 'Owner entry must not add private fields to a shared model')
+        for private_field in ('sourceImageUrl', '_owner', '_accountId', '_shareToken', 'input.png'):
+            self.assertNotIn(private_field, json.dumps(owner_payload))
+
+        credentials = {'username': 'edit_owner', 'password': 'safe test password 123'}
+        response = await self.client.post('/api/model-studio/auth/register', json={**credentials, 'displayName': 'Edit owner'})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertIs((await (await self.client.get(endpoint)).json())['canEdit'], True)
+        self.assertEqual((await self.client.post('/api/model-studio/auth/logout')).status, 200)
+        self.assertIs((await (await self.client.get(endpoint)).json())['canEdit'], False)
+        self.assertEqual((await self.client.get(f"/api/model-studio/jobs/{job['id']}")).status, 404)
+
+        async with self.outsider.post(self.client.make_url('/api/model-studio/auth/login'), json=credentials) as response:
+            self.assertEqual(response.status, 200, await response.text())
+        async with self.outsider.get(self.client.make_url(endpoint)) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIs((await response.json())['canEdit'], True)
+        self.assertIs((await (await self.client.get(endpoint)).json())['canEdit'], False)
+
     async def test_share_persists_across_restart_and_revocation_invalidates_every_url(self):
         job = await self.create()
         endpoint = f"/api/model-studio/jobs/{job['id']}/share"

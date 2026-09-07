@@ -2,3 +2,8 @@
 .publication-choice input[type="checkbox"] { width: 18px; height: 18px; margin: 0; flex: 0 0 auto; accent-color: #35cacc; cursor: pointer; }
 .publication-choice .field-hint { margin-top: 9px; }
 .community-gallery-section { margin-top: 38px; }
+.shared-owner-controls { display:flex; align-items:center; justify-content:space-between; gap:20px; margin:0 0 20px; padding:18px 20px; border:1px solid #2c6269; border-radius:12px; background:#10262b; }
+.shared-owner-controls strong { font-size:14px; color:#d1eeeb; }
+.shared-owner-controls p { margin:6px 0 0; color:#90b1bf; font-size:12px; line-height:1.6; }
+.shared-owner-controls .button { flex-shrink:0; }
+@media(max-width:700px){.shared-owner-controls{align-items:stretch;flex-direction:column;gap:14px;padding:17px}.shared-owner-controls .button{justify-content:center}}

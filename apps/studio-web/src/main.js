@@ -51,6 +51,7 @@ const state = {
   placementDrafts: new Map(),
   deleteTargets: [], deleting: false, deletedIds: new Set(),
   sharing: false,
+  sharedCanEdit: false,
   previewUploads: new Set(),
   authRevision: 0,
 };
@@ -76,7 +77,8 @@ $('app').innerHTML = `
       <span class="local-badge">${icon('zap')}<span>Генерация на твоём ПК<span>Модели работают локально</span></span></span>
     </div>
     <div id="connection-notice" class="notice" role="status" hidden></div>
-    <p class="shared-note" id="shared-note" ${isShared ? '' : 'hidden'}>Модель по ссылке · просмотр и playground. Изменения владельца сохраняются автоматически.</p>
+    <p class="shared-note" id="shared-note" ${isShared ? '' : 'hidden'}>Просмотр модели с сохранёнными настройками автора.</p>
+    <div class="shared-owner-controls" id="shared-owner-controls" hidden><div><strong>Это твоя модель</strong><p>Открой редактор, чтобы настроить фон, землю, положение и скелет.</p></div><a class="button button-primary" id="edit-owned-model">${icon('image')}Настроить мою модель</a></div>
     <div id="shared-error" class="inline-error" role="alert" hidden></div>
     ${isPlayground ? playgroundMarkup() : generationMarkup()}
     ${!isPlayground && !isShared ? '<section id="community-gallery" class="community-gallery-section" aria-label="Галерея сообщества"></section>' : ''}
@@ -936,6 +938,18 @@ async function saveModelPreview(job, requestId) {
   }
 }
 
+function renderSharedOwnerAccess() {
+  const job = getJob();
+  const visible = Boolean(isShared && state.sharedCanEdit && job);
+  $('shared-owner-controls').hidden = !visible;
+  $('shared-note').hidden = !isShared || visible;
+  const link = $('edit-owned-model');
+  if (!visible) { link.removeAttribute('href'); return; }
+  const query = new URLSearchParams({ job: job.id });
+  if (state.selectedMotion) query.set('motion', state.selectedMotion);
+  link.href = `/playground?${query}`;
+}
+
 function renderSelection() {
   const job = getJob();
   observeRigResult(job);
@@ -943,9 +957,10 @@ function renderSelection() {
     const latest = [...(job.motions || [])].reverse().find((motion) => motion.status === 'complete' && motion.glbUrl);
     if (latest) state.selectedMotion = latest.id;
   }
-  const signature = JSON.stringify([job, state.selectedMotion, state.demo, state.rigEditingId]);
+  const signature = JSON.stringify([job, state.selectedMotion, state.demo, state.rigEditingId, state.sharedCanEdit]);
   if (signature === state.selectionSignature) return;
   state.selectionSignature = signature;
+  renderSharedOwnerAccess();
   $('view-reference').hidden = !canViewReference(job);
   $('share-model').hidden = isShared || state.demo || job?.status !== 'complete' || !artifactUrl(job);
   renderEnvironmentPanel($('environment-panel'), !isShared && !state.demo ? job : null, {
@@ -1050,16 +1065,23 @@ async function poll(force = false) {
   if (isShared) {
     try {
       const result = await request(publicModelId ? `/models/${encodeURIComponent(publicModelId)}` : `/shares/${encodeURIComponent(shareToken)}`);
+      if (authRevision !== state.authRevision) return;
+      state.sharedCanEdit = result.canEdit === true;
       state.jobs = [result.job];
       state.selectedId = result.job.id;
       setError('shared-error', null);
       renderSelection();
     } catch (error) {
+      if (authRevision !== state.authRevision) return;
+      state.sharedCanEdit = false;
       state.jobs = [];
       state.selectedId = null;
       renderSelection();
       setError('shared-error', error.message);
-    } finally { state.polling = false; }
+    } finally {
+      state.polling = false;
+      if (authRevision !== state.authRevision) void poll(true);
+    }
     return;
   }
   try {
@@ -1326,8 +1348,13 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 window.addEventListener('pagehide', persistSettingsOnExit);
 window.addEventListener('pagehide', () => { state.viewer?.dispose(); if (state.filePreview) URL.revokeObjectURL(state.filePreview); });
 window.addEventListener('community:auth-changed', () => {
-  if (isShared) return;
   state.authRevision++;
+  if (isShared) {
+    state.sharedCanEdit = false;
+    renderSharedOwnerAccess();
+    void poll(true);
+    return;
+  }
   manualRigPanel?.reset();
   for (const draft of state.placementDrafts.values()) clearTimeout(draft.timer);
   state.placementDrafts.clear();
