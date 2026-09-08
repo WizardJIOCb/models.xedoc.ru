@@ -43,7 +43,7 @@ COMFY = 'http://127.0.0.1:8188'
 KIMODO = 'http://127.0.0.1:8094'
 BLENDER = os.environ.get('STUDIO_BLENDER', r'C:\Program Files\Blender Foundation\Blender 5.1\blender.exe')
 MAX_IMAGE = 20 * 1024 * 1024
-MAX_IMPORT_GLB = 128 * 1024 * 1024
+MAX_IMPORT_GLB = 100 * 1024 * 1024
 MAX_EXPORT_BYTES = 512 * 1024 * 1024
 MAX_EXPORT_MOTIONS = 8
 SESSION_RE = re.compile(r'^[a-f0-9]{48}$')
@@ -626,7 +626,7 @@ class Studio:
             raise
         except (OSError, ValueError, UnicodeDecodeError, struct.error, TypeError, KeyError, IndexError):
             self.discard_new_import(folder)
-            raise web.HTTPBadRequest(text='Нужен корректный самодостаточный GLB 2.0 с сеткой. Размер — до 128 МБ.')
+            raise web.HTTPBadRequest(text='Нужен корректный самодостаточный GLB 2.0 с сеткой. Размер — до 100 МБ.')
 
     async def animate(self, request):
         job = self.owned(request)

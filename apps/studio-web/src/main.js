@@ -204,7 +204,7 @@ function generationMarkup() {
         <label class="field-label" for="import-model">Твоя 3D-модель</label>
         <label class="upload-zone import-upload-zone" id="import-upload-zone" for="import-model" tabindex="0">
           <input type="file" id="import-model" name="model" accept=".glb,model/gltf-binary" />
-          <div id="import-upload-empty" class="upload-empty"><span class="upload-icon">${icon('cube')}</span><strong>Перетащи GLB сюда</strong><span>или <span class="accent">выбери файл</span> на компьютере</span><small>Самодостаточный GLB 2.0 · до 128 МБ</small></div>
+          <div id="import-upload-empty" class="upload-empty"><span class="upload-icon">${icon('cube')}</span><strong>Перетащи GLB сюда</strong><span>или <span class="accent">выбери файл</span> на компьютере</span><small>Самодостаточный GLB 2.0 · до 100 МБ</small></div>
         </label>
         <div class="file-info" id="import-file-info" hidden><span id="import-file-name"></span><button type="button" id="clear-import-file" class="icon-button" aria-label="Убрать GLB">${icon('close')}</button></div>
         <div class="field-group"><label class="field-label" for="import-title">Название в библиотеке</label><input id="import-title" maxlength="100" placeholder="Например: Мой персонаж" autocomplete="off" /><p class="field-hint">Загрузка сохраняется в твоём профиле. Скелет, редактирование и движения можно добавить после импорта.</p></div>
@@ -1421,7 +1421,7 @@ function chooseImportFile(file) {
   if (!file) return;
   if (!/\.glb$/i.test(file.name)) { setError('import-error', 'Нужен файл в формате GLB. Экспортируй модель как self-contained GLB 2.0 и попробуй снова.'); return; }
   if (!file.size) { setError('import-error', 'Файл пустой. Выбери корректную 3D-модель.'); return; }
-  if (file.size > 128 * 1024 * 1024) { setError('import-error', 'GLB больше 128 МБ. Уменьши размер модели или текстур и загрузи снова.'); return; }
+  if (file.size > 100 * 1024 * 1024) { setError('import-error', 'GLB больше 100 МБ. Уменьши размер модели или текстур и загрузи снова.'); return; }
   state.importFile = file;
   $('import-file-name').textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} МБ`;
   $('import-file-info').hidden = false;
