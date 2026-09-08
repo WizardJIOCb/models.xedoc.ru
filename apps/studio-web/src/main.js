@@ -23,6 +23,7 @@ const icons = {
   arrow: '<svg viewBox="0 0 24 24" fill="none"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="none"><path d="m8 4 12 8-12 8V4Z"/></svg>',
   download: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4"/></svg>',
+  eye: '<svg viewBox="0 0 24 24" fill="none"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>',
   reset: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7"/></svg>',
   zap: '<svg viewBox="0 0 24 24" fill="none"><path d="m14 2-10 12h7l-1 8L21 9h-8l1-7Z"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none"><path d="m5 12 4 4L19 6"/></svg>',
@@ -229,7 +230,7 @@ function playgroundMarkup() {
     <section id="comments" class="community-comments playground-comments" aria-labelledby="community-comments-heading" hidden></section></div>
     <aside class="panel playground-controls">
       <div class="panel-heading"><span class="step-number">01</span><h2>Испытай персонажа</h2></div>
-      <div class="playground-content"><div class="selected-model-name" id="playground-model-name">Модель не выбрана</div><p class="field-hint" id="playground-hint">Открой свою модель из библиотеки ниже или начни с демо.</p>
+      <div class="playground-content"><div class="selected-model-name" id="playground-model-name">Модель не выбрана</div><p class="playground-view-count" id="playground-view-count" hidden></p><p class="field-hint" id="playground-hint">Открой свою модель из библиотеки ниже или начни с демо.</p>
         <label class="field-label" for="playground-motion">Движение</label><select id="playground-motion" disabled><option value="">Исходная модель</option></select>
         <p id="motion-library-status" class="field-hint" role="status" hidden></p>
         <p id="playground-motion-progress" class="field-hint" role="status" hidden></p>
@@ -335,6 +336,11 @@ function rigDraft(job) {
 function setError(id, error) { const element = $(id); if (!element) return; element.textContent = error || ''; element.hidden = !error; }
 function shortDate(value) { const date = new Date(value); return Number.isNaN(date.valueOf()) ? '' : new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date); }
 function jobTitle(job) { return job?.title || job?.name || job?.originalFilename || job?.sourceFilename || `Модель ${String(job?.id || '').slice(0, 6)}`; }
+function viewsLabel(value) {
+  const count = Math.max(0, Number(value) || 0);
+  const suffix = count % 100 >= 11 && count % 100 <= 14 ? 'просмотров' : count % 10 === 1 ? 'просмотр' : count % 10 >= 2 && count % 10 <= 4 ? 'просмотра' : 'просмотров';
+  return `${count.toLocaleString('ru-RU')} ${suffix}`;
+}
 function jobProgress(job) { return Math.max(0, Math.min(100, Math.round(Number(job?.progress) || 0))); }
 function rigErrorText(error) {
   const text = String(error || '');
@@ -1212,6 +1218,8 @@ function renderSelection() {
     $('public-model-discussion').hidden = !state.commentsModelId;
     $('public-model-discussion').href = '#comments';
     $('playground-model-name').textContent = state.demo ? 'Doom Slayer · демо' : job ? jobTitle(job) : 'Модель не выбрана';
+    $('playground-view-count').hidden = !job || state.demo || !publicModelId;
+    $('playground-view-count').innerHTML = job && !state.demo && publicModelId ? `${icon('eye')}${escape(viewsLabel(job.viewsCount))}` : '';
     $('playground-hint').textContent = state.demo ? 'Скелетный персонаж из предыдущей генерации. Анимация переключается на физику при ударе.' : job ? preparingRig(job) ? 'Выровняй персонажа, затем создай скелет для движения и ragdoll.' : hasRig(job) ? 'Скелет готов. Испытай движение и реакцию на удар.' : 'После создания модели здесь можно подготовить персонажа к анимации.' : 'Открой свою модель из библиотеки ниже или начни с демо.';
     $('back-to-model').href = job ? `/generate-model?job=${encodeURIComponent(job.id)}` : '/generate-model';
     $('playground-download').hidden = !selectedUrl(job) && !state.demo;
@@ -1631,10 +1639,24 @@ window.addEventListener('community:auth-changed', () => {
   renderSelection();
   void poll(true);
 });
+
+async function trackPublicModelView() {
+  if (!publicModelId) return;
+  try {
+    const { viewsCount } = await request(`/models/${encodeURIComponent(publicModelId)}/view`, { method: 'POST', timeoutMs: 20000 });
+    const job = getJob();
+    if (!job || job.id !== publicModelId) return;
+    job.viewsCount = viewsCount;
+    state.selectionSignature = '';
+    renderSelection();
+  } catch { /* A missing or newly private model is already handled by the regular load. */ }
+}
+
 mountCommunityHeader();
 if ($('community-gallery')) mountGallerySection($('community-gallery'), { limit: 8 });
 renderSelection();
 updateHealth();
+void trackPublicModelView();
 void poll(true);
 void refreshMotionLibrary();
 setInterval(() => { void refreshMotionLibrary(); }, 30000);

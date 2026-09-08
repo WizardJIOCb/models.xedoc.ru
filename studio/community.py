@@ -213,7 +213,8 @@ class Community:
         return {'id': job['id'], 'title': job.get('title', f"Модель {job['id'][:6]}"),
                 'description': job.get('description', ''), 'createdAt': job['createdAt'],
                 'updatedAt': job.get('updatedAt', job['createdAt']), 'previewUrl': preview,
-                'author': self.author(job, author_cache, model_counts), 'commentsCount': count, 'hasRig': bool(job.get('rig', {}).get('available'))}
+                'author': self.author(job, author_cache, model_counts), 'commentsCount': count,
+                'viewsCount': max(0, int(job.get('viewsCount') or 0)), 'hasRig': bool(job.get('rig', {}).get('available'))}
 
     def claim_jobs(self, request, account_id):
         for job in self.studio.jobs.values():
@@ -353,6 +354,12 @@ class Community:
         public_job.update(title=job.get('title', f"Модель {job['id'][:6]}"), description=job.get('description', ''), visibility='public')
         return web.json_response({'job': public_job, 'model': self.summary(job), 'canEdit': self.owns(request, job)})
 
+    async def view(self, request):
+        job = self.public_model(request)
+        job['viewsCount'] = max(0, int(job.get('viewsCount') or 0)) + 1
+        self.studio.save_view_count(job)
+        return web.json_response({'id': job['id'], 'viewsCount': job['viewsCount']})
+
     async def model_artifact(self, request):
         job = self.public_model(request)
         name = request.match_info['file']
@@ -491,7 +498,7 @@ class Community:
                 web.post(prefix + '/auth/login', self.login), web.post(prefix + '/auth/logout', self.logout),
                 web.patch(prefix + '/auth/profile', self.edit_profile), web.get(prefix + '/profiles', self.profiles),
                 web.get(prefix + '/profiles/{username}', self.profile), web.get(prefix + '/gallery', self.gallery),
-                web.get(prefix + '/models/{model_id}', self.model), web.get(prefix + '/models/{model_id}/files/{file:.*}', self.model_artifact),
+                web.get(prefix + '/models/{model_id}', self.model), web.post(prefix + '/models/{model_id}/view', self.view), web.get(prefix + '/models/{model_id}/files/{file:.*}', self.model_artifact),
                 web.get(prefix + '/models/{model_id}/preview', self.model_preview), web.patch(prefix + '/jobs/{job_id}/publication', self.publication),
                 web.post(prefix + '/jobs/{job_id}/preview', self.preview), web.get(prefix + '/models/{model_id}/comments', self.comments),
                 web.post(prefix + '/models/{model_id}/comments', self.add_comment), web.delete(prefix + '/comments/{comment_id}', self.delete_comment)]

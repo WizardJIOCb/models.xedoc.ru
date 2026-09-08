@@ -71,6 +71,18 @@ class CommunityHTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.request('GET', f"/api/model-studio/models/{job['id']}", self.outsider)).status, 404)
         self.assertEqual((await self.get_json(f"/api/model-studio/models/{public['id']}", self.outsider))['canEdit'], False)
 
+    async def test_public_model_views_are_persisted_and_hidden_models_do_not_count(self):
+        job = await self.create()
+        endpoint = f"/api/model-studio/models/{job['id']}/view"
+        self.assertEqual((await self.get_json(f"/api/model-studio/models/{job['id']}", self.outsider))['model']['viewsCount'], 0)
+        response = await self.request('POST', endpoint, self.outsider)
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual((await response.json())['viewsCount'], 1)
+        self.assertEqual((await self.get_json('/api/model-studio/gallery', self.outsider))['models'][0]['viewsCount'], 1)
+        self.assertEqual((await self.get_json(f"/api/model-studio/models/{job['id']}", self.outsider))['model']['viewsCount'], 1)
+        await self.publish(job, visibility='private')
+        self.assertEqual((await self.request('POST', endpoint, self.outsider)).status, 404)
+
     async def test_register_claims_job_and_logout_removes_anonymous_access(self):
         job = await self.create()
         saved = self.studio.jobs[job['id']]

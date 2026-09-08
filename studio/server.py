@@ -91,6 +91,10 @@ class Studio:
         job['updatedAt'] = now()
         atomic_json(JOB_ROOT / job['id'] / 'job.json', job)
 
+    def save_view_count(self, job):
+        """Persist a public view without making it look like an edited model."""
+        atomic_json(JOB_ROOT / job['id'] / 'job.json', job)
+
     def public(self, job, *, author_cache=None, model_counts=None):
         def clean(value):
             if isinstance(value, dict):
