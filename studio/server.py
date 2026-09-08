@@ -812,7 +812,7 @@ class Studio:
         return files
 
     def shared_payload(self, job, prefix, include_prompts=True):
-        shared = {key: job[key] for key in ('id', 'title', 'name', 'mode', 'visibility', 'stats', 'placement', 'modelRotation', 'updatedAt') if key in job}
+        shared = {key: job[key] for key in ('id', 'title', 'name', 'mode', 'visibility', 'stats', 'placement', 'modelRotation', 'updatedAt', 'viewsCount') if key in job}
         shared.update(status='complete', stage='Готово', progress=100,
                       artifacts={'modelUrl': prefix + mesh_path(job)},
                       rig={'available': False, 'status': 'not_requested'}, motions=[])
