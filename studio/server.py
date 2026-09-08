@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import logging
@@ -11,9 +12,11 @@ import re
 import secrets
 import shutil
 import stat
+import struct
 import sys
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +43,9 @@ COMFY = 'http://127.0.0.1:8188'
 KIMODO = 'http://127.0.0.1:8094'
 BLENDER = os.environ.get('STUDIO_BLENDER', r'C:\Program Files\Blender Foundation\Blender 5.1\blender.exe')
 MAX_IMAGE = 20 * 1024 * 1024
+MAX_IMPORT_GLB = 128 * 1024 * 1024
+MAX_EXPORT_BYTES = 512 * 1024 * 1024
+MAX_EXPORT_MOTIONS = 8
 SESSION_RE = re.compile(r'^[a-f0-9]{48}$')
 SHARE_RE = re.compile(r'^[A-Za-z0-9_-]{43}$')
 ID_RE = re.compile(r'^[a-f0-9-]{36}$')
@@ -63,6 +69,26 @@ def atomic_json(path, value):
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
     temp.replace(path)
+
+
+def imported_glb_summary(path):
+    """Validate a self-contained GLB before it becomes a persistent job file."""
+    stats = glb_summary(path)
+    if not stats['meshes'] or not stats['triangles']:
+        raise ValueError('GLB must contain a triangle mesh')
+    with path.open('rb') as handle:
+        header = handle.read(20)
+        magic, version, total, json_size, json_kind = struct.unpack('<4sIIII', header)
+        if magic != b'glTF' or version != 2 or total != path.stat().st_size or json_kind != 0x4E4F534A:
+            raise ValueError('Invalid GLB header')
+        document = json.loads(handle.read(json_size))
+    # GLB files may technically point to external files, but this studio stores
+    # one artifact per model. Reject those references instead of creating a
+    # model that looks accepted and then fails in the viewer or export.
+    for collection in ('buffers', 'images'):
+        if any(isinstance(item, dict) and item.get('uri') and not str(item['uri']).startswith('data:') for item in document.get(collection, [])):
+            raise ValueError('GLB has external assets')
+    return stats
 
 
 class Studio:
@@ -513,6 +539,95 @@ class Studio:
         self.queue.put_nowait(('model', jid, None))
         return web.json_response(self.public(job), status=202)
 
+    def discard_new_import(self, folder):
+        """Remove only the fresh UUID directory created for a failed import."""
+        if folder is None or not folder.exists():
+            return
+        try:
+            root = JOB_ROOT.resolve(strict=True)
+            if folder.parent.resolve() != root or not ID_RE.fullmatch(folder.name):
+                raise ValueError('Import folder is outside model storage')
+            self.verify_delete_tree(folder, root)
+            shutil.rmtree(folder)
+        except (OSError, ValueError):
+            LOG.exception('Could not clean up failed imported model %s', folder)
+
+    async def import_model(self, request):
+        """Store a user-owned GLB without sending it through the GPU queue."""
+        account = request.get('account')
+        if not account:
+            raise web.HTTPUnauthorized(text='Войди в профиль, чтобы сохранить загруженную модель в библиотеке.')
+        self.limit(request)
+        if request.content_type != 'multipart/form-data':
+            raise web.HTTPBadRequest(text='Нужна форма с файлом GLB.')
+        if request.content_length and request.content_length > MAX_IMPORT_GLB + 1024 * 1024:
+            raise web.HTTPRequestEntityTooLarge(max_size=MAX_IMPORT_GLB, actual_size=request.content_length)
+        try:
+            reader = await request.multipart()
+        except (AssertionError, ValueError):
+            raise web.HTTPBadRequest(text='Некорректная форма загрузки.')
+
+        folder = None
+        fields, upload, original_name = {}, None, None
+        part_count = 0
+        try:
+            async for field in reader:
+                part_count += 1
+                if part_count > 4 or isinstance(field, aiohttp.MultipartReader):
+                    raise web.HTTPBadRequest(text='Слишком много полей формы.')
+                if field.name == 'model':
+                    if upload is not None or not field.filename:
+                        raise web.HTTPBadRequest(text='Загрузите один файл GLB.')
+                    original_name = Path(str(field.filename).replace('\\', '/')).name
+                    if not original_name:
+                        raise web.HTTPBadRequest(text='У файла нет имени.')
+                    jid = str(uuid.uuid4())
+                    folder = JOB_ROOT / jid
+                    folder.mkdir()
+                    upload = folder / 'model.glb.uploading'
+                    written = 0
+                    with upload.open('wb') as target:
+                        while chunk := await field.read_chunk(65536):
+                            written += len(chunk)
+                            if written > MAX_IMPORT_GLB:
+                                raise web.HTTPRequestEntityTooLarge(max_size=MAX_IMPORT_GLB, actual_size=written)
+                            target.write(chunk)
+                elif field.name in ('title', 'visibility'):
+                    value = await field.read_chunk(512)
+                    if not field.at_eof():
+                        raise web.HTTPBadRequest(text='Недопустимый параметр.')
+                    fields[field.name] = value.decode('utf-8')
+                else:
+                    raise web.HTTPBadRequest(text='Неизвестное поле формы.')
+            if upload is None or not upload.is_file() or not upload.stat().st_size:
+                raise web.HTTPBadRequest(text='Добавьте файл GLB.')
+            visibility = fields.get('visibility', 'private')
+            if visibility not in ('public', 'private'):
+                raise web.HTTPBadRequest(text='Видимость: public или private.')
+            stats = imported_glb_summary(upload)
+            title = fields.get('title', '').strip() or Path(original_name).stem[:100] or 'Моя модель'
+            title = self.community.text(title, 'Название', 100, 1)
+            upload.replace(folder / 'model.glb')
+            job = {
+                'id': jid, '_owner': request['session'], '_accountId': account['id'],
+                'kind': 'import', 'mode': 'import', 'quality': 'original',
+                'originalFilename': original_name, 'title': title, 'visibility': visibility,
+                'status': 'complete', 'stage': 'Импортировано', 'progress': 100,
+                'createdAt': now(), 'updatedAt': now(), 'artifacts': {}, 'stats': stats,
+                'rig': {'available': False, 'status': 'not_requested'}, 'motions': [],
+            }
+            job['artifacts']['modelUrl'] = self.file_url(job, 'model.glb')
+            # Save before exposing the job through the in-memory list.
+            self.save(job)
+            self.jobs[jid] = job
+            return web.json_response(self.public(job), status=201)
+        except web.HTTPException:
+            self.discard_new_import(folder)
+            raise
+        except (OSError, ValueError, UnicodeDecodeError, struct.error, TypeError, KeyError, IndexError):
+            self.discard_new_import(folder)
+            raise web.HTTPBadRequest(text='Нужен корректный самодостаточный GLB 2.0 с сеткой. Размер — до 128 МБ.')
+
     async def animate(self, request):
         job = self.owned(request)
         self.limit(request)
@@ -778,6 +893,84 @@ class Studio:
         job.update(candidate)
         return web.json_response(self.public(job))
 
+    @staticmethod
+    def export_artifact(job, relative):
+        """Resolve a job artifact without letting a stored path leave its job."""
+        directory = JOB_ROOT / job['id']
+        path = directory / relative
+        try:
+            root = directory.resolve(strict=True)
+            if directory.resolve().parent != JOB_ROOT.resolve(strict=True) or not path.is_file() or not path.resolve().is_relative_to(root):
+                raise ValueError('Artifact leaves job storage')
+        except (OSError, ValueError):
+            raise web.HTTPConflict(text='Не удалось безопасно найти файл модели. Открой модель и повтори экспорт.')
+        return path
+
+    async def export_motions(self, request):
+        """Package the current model and explicitly selected completed motions."""
+        job = self.owned(request)
+        selected = request.query.getall('motion')
+        if not selected:
+            raise web.HTTPBadRequest(text='Выберите хотя бы одно готовое движение.')
+        if len(selected) > MAX_EXPORT_MOTIONS or len(selected) != len(set(selected)) or any(not ID_RE.fullmatch(item) for item in selected):
+            raise web.HTTPBadRequest(text=f'Можно экспортировать от 1 до {MAX_EXPORT_MOTIONS} разных готовых движений.')
+        if job.get('status') != 'complete':
+            raise web.HTTPConflict(text='Экспорт доступен после завершения модели.')
+
+        source = job.get('rig', {}).get('_path', 'rig/rigged.glb') if job.get('rig', {}).get('available') else mesh_path(job)
+        base = self.export_artifact(job, source)
+        completed = {motion.get('id'): motion for motion in job.get('motions', []) if motion.get('status') == 'complete'}
+        if any(item not in completed for item in selected):
+            raise web.HTTPConflict(text='Одно из выбранных движений ещё не готово или больше недоступно.')
+        motion_files = []
+        for motion_id in selected:
+            motion_files.append((completed[motion_id], self.export_artifact(job, f'motions/{motion_id}/animated.glb')))
+        sources = [base, *(path for _, path in motion_files)]
+        total = sum(path.stat().st_size for path in sources)
+        if total > MAX_EXPORT_BYTES:
+            raise web.HTTPRequestEntityTooLarge(max_size=MAX_EXPORT_BYTES, actual_size=total)
+
+        # Caching by immutable source metadata makes repeat downloads cheap while
+        # preserving a new export whenever the model or a chosen clip changes.
+        signature = [(path.relative_to(JOB_ROOT / job['id']).as_posix(), path.stat().st_mtime_ns, path.stat().st_size) for path in sources]
+        digest = hashlib.sha256(json.dumps(signature, separators=(',', ':')).encode('utf-8')).hexdigest()
+        directory = JOB_ROOT / job['id'] / 'exports'
+        directory.mkdir(exist_ok=True)
+        try:
+            root = (JOB_ROOT / job['id']).resolve(strict=True)
+            if directory.resolve().parent != root:
+                raise ValueError('Export directory leaves job storage')
+        except (OSError, ValueError):
+            raise web.HTTPConflict(text='Не удалось подготовить безопасный пакет экспорта.')
+        archive_path = directory / f'{digest}.zip'
+        try:
+            if archive_path.exists() and (not archive_path.is_file() or not archive_path.resolve().is_relative_to(root)):
+                raise ValueError('Export archive leaves job storage')
+        except (OSError, ValueError):
+            raise web.HTTPConflict(text='Не удалось безопасно открыть сохранённый пакет экспорта.')
+        if not archive_path.is_file():
+            temporary = directory / f'.{digest}-{uuid.uuid4().hex}.tmp'
+            manifest = {
+                'format': 'models.xedoc.ru-animation-export-v1', 'modelId': job['id'],
+                'title': job.get('title', ''), 'model': 'model.glb',
+                'animations': [{'id': motion['id'], 'prompt': motion.get('prompt', ''),
+                                'file': f'animations/{index:02d}.glb'} for index, (motion, _) in enumerate(motion_files, 1)],
+            }
+            try:
+                with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+                    archive.write(base, 'model.glb')
+                    for index, (_, path) in enumerate(motion_files, 1):
+                        archive.write(path, f'animations/{index:02d}.glb')
+                    archive.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
+                    archive.writestr('README.txt', 'model.glb — текущая модель. Каждый файл в animations содержит эту модель с выбранным движением.\n')
+                temporary.replace(archive_path)
+            except (OSError, zipfile.BadZipFile):
+                temporary.unlink(missing_ok=True)
+                raise web.HTTPServiceUnavailable(text='Не удалось собрать пакет экспорта. Повторите попытку.')
+        response = artifact_response(request, archive_path)
+        response.headers['Content-Disposition'] = 'attachment; filename="models-studio-export.zip"'
+        return response
+
     async def share_create(self, request):
         job = self.owned(request)
         if job['status'] != 'complete' or not (JOB_ROOT / job['id'] / 'model.glb').is_file():
@@ -983,7 +1176,7 @@ async def index(request):
 
 def create_app():
     studio = Studio()
-    app = web.Application(middlewares=[sessions], client_max_size=MAX_IMAGE + 1024 * 1024)
+    app = web.Application(middlewares=[sessions], client_max_size=max(MAX_IMAGE, MAX_IMPORT_GLB) + 1024 * 1024)
     app['studio'] = studio
     app.on_startup.append(studio.start)
     app.on_cleanup.append(studio.stop)
@@ -992,6 +1185,7 @@ def create_app():
     app.add_routes([web.get(prefix + '/health', studio.health), web.get(prefix + '/jobs', studio.jobs_list),
                     web.get(prefix + '/motion-library', studio.motion_library.catalog),
                     web.post(prefix + '/jobs', studio.create_job), web.get(prefix + '/jobs/{job_id}', studio.job_get),
+                    web.post(prefix + '/jobs/import', studio.import_model),
                     web.delete(prefix + '/jobs/{job_id}', studio.delete_job),
                     web.post(prefix + '/jobs/{job_id}/mesh-edit', studio.mesh_edits.edit),
                     web.post(prefix + '/jobs/{job_id}/mesh-restore', studio.mesh_edits.restore),
@@ -1003,7 +1197,8 @@ def create_app():
                     web.get(prefix + '/shares/{token}/files/{file:.*}', studio.share_file),
                     web.post(prefix + '/jobs/{job_id}/rig', studio.rig),
                     web.put(prefix + '/jobs/{job_id}/rig-draft', studio.rig_draft),
-                    web.post(prefix + '/jobs/{job_id}/animate', studio.animate), web.get(prefix + '/files/{job_id}/{file:.*}', studio.file),
+                    web.post(prefix + '/jobs/{job_id}/animate', studio.animate), web.get(prefix + '/jobs/{job_id}/export', studio.export_motions),
+                    web.get(prefix + '/files/{job_id}/{file:.*}', studio.file),
                     web.get(prefix + '/demo/glb', studio.demo), web.post('/api/generate', studio.legacy_generate),
                     web.get('/generate-model', index), web.get('/generate-model/', index), web.get('/playground', index),
                     web.get('/playground/', index), web.get('/model-studio/', index), web.get('/', index)])

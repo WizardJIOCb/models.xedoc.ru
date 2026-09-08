@@ -2,6 +2,7 @@ import './style.css';
 import './placement.css';
 import './library-actions.css';
 import './community-integration.css';
+import './import-model.css';
 import { mountCommunityHeader, mountGallerySection, mountComments, renderPublicationPanel } from './community.js';
 import { renderEnvironmentPanel, getEnvironmentPreview, saveEnvironmentPanel } from './environment-panel.js';
 import { manualRigMarkup, createManualRigPanel } from './manual-rig-panel.js';
@@ -42,7 +43,8 @@ const stageLabels = {
   exporting: 'Сохраняем результат', complete: 'Модель готова', failed: 'Не удалось завершить',
 };
 const state = {
-  file: null, filePreview: null, mode: 'object', quality: 'standard', jobs: [], health: null,
+  file: null, filePreview: null, importFile: null, importing: false,
+  creationMode: params.get('import') === '1' ? 'import' : 'image', mode: 'object', quality: 'standard', jobs: [], health: null,
   selectedId: isShared ? null : params.get('job') || localStorage.getItem('model-studio-selected') || null,
   selectedMotion: params.get('motion') || null, demo: !isShared && params.get('demo') === '1',
   submitting: false, animating: false, polling: false, viewer: null, viewerKey: '',
@@ -59,9 +61,10 @@ const state = {
   commentsModelId: null, disposeComments: null,
   motionLibrary: [], motionLibraryReady: false, motionLibraryLoading: false, motionLibraryError: null,
   meshEditingId: null, meshEntryPending: false, meshReturnView: null,
+  exportSelections: new Map(),
 };
 
-document.title = `${isPlayground ? 'Playground' : 'Генерация 3D-моделей'} · models.xedoc.ru`;
+document.title = `${isPlayground ? 'Playground' : state.creationMode === 'import' ? 'Загрузка GLB' : 'Генерация 3D-моделей'} · models.xedoc.ru`;
 $('app').innerHTML = `
   <header class="site-header">
     <div class="header-inner">
@@ -69,6 +72,7 @@ $('app').innerHTML = `
       <nav class="main-nav" aria-label="Режимы студии">
         <a href="/">Анимация по тексту</a>
         <a href="/generate-model" ${!isPlayground ? 'aria-current="page"' : ''}>3D по картинке</a>
+        <a href="/generate-model?import=1">Загрузить GLB</a>
         <a href="/playground" ${isPlayground ? 'aria-current="page"' : ''}>Playground</a>
       </nav>
       <div class="connection-chip" id="connection-chip" role="status"><span class="status-dot pending"></span><span id="connection-label">Проверяем связь</span></div>
@@ -76,9 +80,9 @@ $('app').innerHTML = `
   </header>
   <main class="page ${isPlayground ? 'playground-page' : ''}">
     <div class="page-heading">
-      <div><div class="eyebrow">${isPlayground ? 'ДВИЖЕНИЕ · ФИЗИКА · WEBGL' : 'ИЗ ИЗОБРАЖЕНИЯ В ТРЕТЬЕ ИЗМЕРЕНИЕ'}</div>
-      <h1>${isPlayground ? 'Проверь модель в действии' : 'Одна картинка. Целая 3D-модель.'}</h1>
-      <p>${isPlayground ? 'Запускай анимацию, наноси удары и наблюдай, как персонаж переходит в ragdoll.' : 'Загрузи референс, создай объёмный объект и оживи персонажа — в одной студии.'}</p></div>
+      <div><div class="eyebrow" id="creation-eyebrow">${isPlayground ? 'ДВИЖЕНИЕ · ФИЗИКА · WEBGL' : state.creationMode === 'import' ? 'СВОЯ МОДЕЛЬ · GLB · АНИМАЦИЯ' : 'ИЗ ИЗОБРАЖЕНИЯ В ТРЕТЬЕ ИЗМЕРЕНИЕ'}</div>
+      <h1 id="creation-page-title">${isPlayground ? 'Проверь модель в действии' : state.creationMode === 'import' ? 'Загрузи свою 3D-модель.' : 'Одна картинка. Целая 3D-модель.'}</h1>
+      <p id="creation-page-description">${isPlayground ? 'Запускай анимацию, наноси удары и наблюдай, как персонаж переходит в ragdoll.' : state.creationMode === 'import' ? 'Сохрани GLB в библиотеке, отредактируй его, подготовь скелет и добавь движения.' : 'Загрузи референс, создай объёмный объект и оживи персонажа — в одной студии.'}</p></div>
       <span class="local-badge">${icon('zap')}<span>Генерация на твоём ПК<span>Модели работают локально</span></span></span>
     </div>
     <div id="connection-notice" class="notice" role="status" hidden></div>
@@ -174,7 +178,8 @@ function generationMarkup() {
   return `<div class="workbench">
     <section class="panel create-panel" aria-labelledby="create-title">
       <div class="panel-heading"><span class="step-number">01</span><h2 id="create-title">Создание модели</h2></div>
-      <form id="generation-form">
+      <div class="creation-mode-tabs" role="group" aria-label="Способ создания модели"><button type="button" class="creation-mode-tab ${state.creationMode === 'image' ? 'active' : ''}" data-creation-mode="image" aria-pressed="${state.creationMode === 'image'}">${icon('image')}Из картинки</button><button type="button" class="creation-mode-tab ${state.creationMode === 'import' ? 'active' : ''}" data-creation-mode="import" aria-pressed="${state.creationMode === 'import'}">${icon('upload')}Загрузить GLB</button></div>
+      <form id="generation-form"${state.creationMode === 'image' ? '' : ' hidden'}>
         <label class="field-label" for="source-image">Изображение-референс</label>
         <label class="upload-zone" id="upload-zone" for="source-image" tabindex="0">
           <input type="file" id="source-image" name="image" accept="image/png,image/jpeg,image/webp" />
@@ -194,6 +199,19 @@ function generationMarkup() {
         <div id="form-error" class="inline-error" role="alert" hidden></div>
         <button class="button button-primary generate-button" id="generate-button" type="submit" disabled>${icon('zap')}<span>Создать 3D-модель</span>${icon('arrow')}</button>
         <p class="submit-note" id="submit-note">Загрузи изображение, чтобы начать.</p>
+      </form>
+      <form id="import-form"${state.creationMode === 'import' ? '' : ' hidden'}>
+        <label class="field-label" for="import-model">Твоя 3D-модель</label>
+        <label class="upload-zone import-upload-zone" id="import-upload-zone" for="import-model" tabindex="0">
+          <input type="file" id="import-model" name="model" accept=".glb,model/gltf-binary" />
+          <div id="import-upload-empty" class="upload-empty"><span class="upload-icon">${icon('cube')}</span><strong>Перетащи GLB сюда</strong><span>или <span class="accent">выбери файл</span> на компьютере</span><small>Самодостаточный GLB 2.0 · до 128 МБ</small></div>
+        </label>
+        <div class="file-info" id="import-file-info" hidden><span id="import-file-name"></span><button type="button" id="clear-import-file" class="icon-button" aria-label="Убрать GLB">${icon('close')}</button></div>
+        <div class="field-group"><label class="field-label" for="import-title">Название в библиотеке</label><input id="import-title" maxlength="100" placeholder="Например: Мой персонаж" autocomplete="off" /><p class="field-hint">Загрузка сохраняется в твоём профиле. Скелет, редактирование и движения можно добавить после импорта.</p></div>
+        <div class="field-group publication-choice"><label><input type="checkbox" id="publish-imported-model" /> Публиковать в галерее</label><p class="field-hint">По умолчанию модель приватная. Опубликуй её только если готов делиться с сообществом.</p></div>
+        <div id="import-error" class="inline-error" role="alert" hidden></div>
+        <button class="button button-primary generate-button" id="import-button" type="submit" disabled>${icon('upload')}<span>Сохранить GLB в библиотеке</span>${icon('arrow')}</button>
+        <p class="submit-note" id="import-note">Войди в профиль, чтобы загрузить и сохранить свою модель.</p>
       </form>
     </section>
     <section class="result-column" aria-label="Результат генерации">
@@ -403,6 +421,9 @@ function updateHealth() {
     $('generate-button').disabled = !ready || !state.file || state.submitting;
     $('generate-button').querySelector('span:not(.icon)').textContent = state.submitting ? 'Отправляем изображение…' : 'Создать 3D-модель';
     $('submit-note').textContent = !state.file ? 'Загрузи изображение, чтобы начать.' : !ready ? 'Для генерации нужен подключённый компьютер.' : busy ? 'Задача встанет в очередь и начнётся автоматически.' : 'Генерация выполняется на видеокарте твоего компьютера.';
+    $('import-button').disabled = !online || !state.importFile || state.importing;
+    $('import-button').querySelector('span:not(.icon)').textContent = state.importing ? 'Сохраняем GLB…' : 'Сохранить GLB в библиотеке';
+    $('import-note').textContent = !state.importFile ? 'Выбери самодостаточный GLB 2.0, чтобы продолжить.' : !online ? 'Для загрузки нужен подключённый компьютер.' : 'Модель сохранится в профиле без запуска генерации на видеокарте.';
     updateAnimationAvailability();
   } else renderRigPreparation();
 }
@@ -632,6 +653,7 @@ async function receiveCleanedModel(updated) {
   state.rigEditingId = null;
   state.selectedMotion = 'base';
   state.rigDrafts.delete(id);
+  state.exportSelections.delete(id);
   manualRigPanel?.forget(id);
   // Suppress automatic loading until the owner payload has been replaced.
   state.meshEntryPending = true;
@@ -833,6 +855,7 @@ function removeDeletedJob(id) {
   state.deletedIds.add(id);
   state.jobs = state.jobs.filter((job) => job.id !== id);
   state.rigDrafts.delete(id);
+  state.exportSelections.delete(id);
   clearTimeout(state.placementDrafts.get(id)?.timer);
   state.placementDrafts.delete(id);
   if (state.rigEditingId === id) state.rigEditingId = null;
@@ -967,7 +990,10 @@ async function revokeShare() {
 function renderMotions(job) {
   const motions = job?.motions || [];
   const library = libraryMotions(job);
-  const signature = JSON.stringify([motions, library, state.selectedMotion, sourceView(job), editingMesh(job), hasRig(job), state.motionLibraryReady, state.motionLibraryError]);
+  const exportable = motions.filter((motion) => motion.status === 'complete' && motion.glbUrl && /^[a-f0-9-]{36}$/.test(motion.id || ''));
+  const chosen = new Set([...(state.exportSelections.get(job?.id) || [])].filter((id) => exportable.some((motion) => motion.id === id)));
+  if (job && chosen.size !== (state.exportSelections.get(job.id)?.size || 0)) state.exportSelections.set(job.id, chosen);
+  const signature = JSON.stringify([motions, library, state.selectedMotion, sourceView(job), editingMesh(job), hasRig(job), state.motionLibraryReady, state.motionLibraryError, [...chosen]]);
   if (signature === state.motionSignature) return;
   state.motionSignature = signature;
   if (isPlayground) {
@@ -986,7 +1012,11 @@ function renderMotions(job) {
     notice.textContent = state.motionLibraryError || (!state.motionLibraryReady ? 'Загружаем готовые движения…' : !hasRig(job) ? (isShared ? 'Движения станут доступны, когда владелец создаст скелет модели.' : 'Движения доступны после создания скелета. Подготовь персонажа ниже — список включится автоматически.') : !canPlay ? 'Заверши редактирование, чтобы воспроизвести движение.' : library.length ? 'Первое открытие подготавливает движение для этой модели. Затем используется сохранённая версия.' : 'Готовых движений пока нет.');
     notice.hidden = !job;
   } else {
-    $('motions-list').innerHTML = motions.map((motion) => `<div class="motion-row ${state.selectedMotion === motion.id ? 'selected' : ''}"><div class="motion-icon">${icon(motion.status === 'complete' ? 'play' : motion.status === 'failed' ? 'close' : 'reset')}</div><div class="motion-info"><strong>${escape(motion.prompt || 'Движение')}</strong><span>${motion.status === 'complete' ? `${Math.round((motion.frames || 150) / (motion.fps || 30))} с · готово` : escape(motion.status === 'failed' ? motion.error || 'Ошибка генерации' : stageText(motion.stage, 'В очереди'))}</span></div>${motion.status === 'complete' && motion.glbUrl ? `<button class="icon-button ${state.selectedMotion === motion.id ? 'active' : ''}" data-motion="${escape(motion.id)}" title="Посмотреть анимацию" aria-label="Посмотреть анимацию">${icon('play')}</button><a class="icon-button" href="${escape(motion.glbUrl)}" download title="Скачать GLB с анимацией" aria-label="Скачать GLB с анимацией">${icon('download')}</a>` : ''}</div>`).join('');
+    const selection = [...chosen];
+    const query = new URLSearchParams();
+    selection.forEach((id) => query.append('motion', id));
+    const exportPanel = exportable.length ? `<div class="motion-export-panel"><p>Выбери готовые движения: ZIP будет содержать текущую модель и отдельный GLB с каждым выбранным клипом.</p>${selection.length ? `<a class="button button-secondary" href="${API}/jobs/${encodeURIComponent(job.id)}/export?${query}" download>${icon('download')}Экспортировать ZIP · ${selection.length}</a>` : `<span class="button button-secondary motion-export-disabled" aria-disabled="true">${icon('download')}Выбери движения для экспорта</span>`}</div>` : '';
+    $('motions-list').innerHTML = motions.map((motion) => `<div class="motion-row ${state.selectedMotion === motion.id ? 'selected' : ''}"><div class="motion-icon">${icon(motion.status === 'complete' ? 'play' : motion.status === 'failed' ? 'close' : 'reset')}</div><div class="motion-info"><strong>${escape(motion.prompt || 'Движение')}</strong><span>${motion.status === 'complete' ? `${Math.round((motion.frames || 150) / (motion.fps || 30))} с · готово` : escape(motion.status === 'failed' ? motion.error || 'Ошибка генерации' : stageText(motion.stage, 'В очереди'))}</span>${exportable.some((item) => item.id === motion.id) ? `<label class="motion-export-choice"><input type="checkbox" data-export-motion="${escape(motion.id)}" ${chosen.has(motion.id) ? 'checked' : ''} />В экспорт</label>` : ''}</div>${motion.status === 'complete' && motion.glbUrl ? `<button class="icon-button ${state.selectedMotion === motion.id ? 'active' : ''}" data-motion="${escape(motion.id)}" title="Посмотреть анимацию" aria-label="Посмотреть анимацию">${icon('play')}</button><a class="icon-button" href="${escape(motion.glbUrl)}" download title="Скачать GLB с анимацией" aria-label="Скачать GLB с анимацией">${icon('download')}</a>` : ''}</div>`).join('') + exportPanel;
   }
 }
 
@@ -1276,6 +1306,7 @@ function selectJob(id, { retainMotion = false } = {}) {
   state.demo = false;
   if (!isShared) localStorage.setItem('model-studio-selected', id);
   const query = new URLSearchParams(publicModelId ? { model: publicModelId } : isShared ? { share: shareToken } : { job: id });
+  if (!isPlayground && state.creationMode === 'import') query.set('import', '1');
   if (state.selectedMotion) query.set('motion', state.selectedMotion);
   history.replaceState(null, '', `${isPlayground ? '/playground' : '/generate-model'}?${query}`);
   renderJobs();
@@ -1386,6 +1417,50 @@ function chooseFile(file) {
   updateHealth();
 }
 
+function chooseImportFile(file) {
+  if (!file) return;
+  if (!/\.glb$/i.test(file.name)) { setError('import-error', 'Нужен файл в формате GLB. Экспортируй модель как self-contained GLB 2.0 и попробуй снова.'); return; }
+  if (!file.size) { setError('import-error', 'Файл пустой. Выбери корректную 3D-модель.'); return; }
+  if (file.size > 128 * 1024 * 1024) { setError('import-error', 'GLB больше 128 МБ. Уменьши размер модели или текстур и загрузи снова.'); return; }
+  state.importFile = file;
+  $('import-file-name').textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} МБ`;
+  $('import-file-info').hidden = false;
+  $('import-upload-zone').classList.add('has-model');
+  $('import-upload-empty').querySelector('strong').textContent = 'GLB готов к загрузке';
+  setError('import-error', null);
+  updateHealth();
+}
+
+function clearImportFile() {
+  state.importFile = null;
+  $('import-model').value = '';
+  $('import-file-info').hidden = true;
+  $('import-upload-zone').classList.remove('has-model');
+  $('import-upload-empty').querySelector('strong').textContent = 'Перетащи GLB сюда';
+  setError('import-error', null);
+  updateHealth();
+}
+
+function setCreationMode(mode) {
+  if (isPlayground || !['image', 'import'].includes(mode)) return;
+  state.creationMode = mode;
+  $('generation-form').hidden = mode !== 'image';
+  $('import-form').hidden = mode !== 'import';
+  document.querySelectorAll('[data-creation-mode]').forEach((button) => {
+    const selected = button.dataset.creationMode === mode;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+  $('creation-eyebrow').textContent = mode === 'import' ? 'СВОЯ МОДЕЛЬ · GLB · АНИМАЦИЯ' : 'ИЗ ИЗОБРАЖЕНИЯ В ТРЕТЬЕ ИЗМЕРЕНИЕ';
+  $('creation-page-title').textContent = mode === 'import' ? 'Загрузи свою 3D-модель.' : 'Одна картинка. Целая 3D-модель.';
+  $('creation-page-description').textContent = mode === 'import' ? 'Сохрани GLB в библиотеке, отредактируй его, подготовь скелет и добавь движения.' : 'Загрузи референс, создай объёмный объект и оживи персонажа — в одной студии.';
+  document.title = `${mode === 'import' ? 'Загрузка GLB' : 'Генерация 3D-моделей'} · models.xedoc.ru`;
+  const query = new URLSearchParams(location.search);
+  if (mode === 'import') query.set('import', '1'); else query.delete('import');
+  history.replaceState(null, '', `/generate-model${query.size ? `?${query}` : ''}`);
+  updateHealth();
+}
+
 function chooseMode(mode) {
   state.mode = mode;
   document.querySelectorAll('[data-mode]').forEach((button) => { const selected = button.dataset.mode === mode; button.classList.toggle('active', selected); button.setAttribute('aria-pressed', String(selected)); });
@@ -1418,6 +1493,28 @@ async function submitGeneration(event) {
     void poll(true);
   } catch (error) { setError('form-error', error.message); }
   finally { state.submitting = false; updateHealth(); }
+}
+
+async function submitImport(event) {
+  event.preventDefault();
+  if (!state.importFile || state.importing) return;
+  state.importing = true;
+  setError('import-error', null);
+  updateHealth();
+  try {
+    const form = new FormData();
+    form.set('model', state.importFile);
+    form.set('title', $('import-title').value.trim());
+    form.set('visibility', $('publish-imported-model').checked ? 'public' : 'private');
+    const result = await request('/jobs/import', { method: 'POST', body: form, timeoutMs: 120000 });
+    const job = result.job || result;
+    state.jobs = [job, ...state.jobs.filter((item) => item.id !== job.id)];
+    selectJob(job.id);
+    clearImportFile();
+    toast('GLB сохранён. Открой Playground, чтобы отредактировать модель и подготовить скелет.');
+    void poll(true);
+  } catch (error) { setError('import-error', error.message); }
+  finally { state.importing = false; updateHealth(); }
 }
 
 async function submitAnimation(event) {
@@ -1508,13 +1605,29 @@ if (!isPlayground) {
     $('upload-zone').classList.remove('has-image');
     updateHealth();
   });
+  $('import-model').addEventListener('change', (event) => chooseImportFile(event.target.files[0]));
+  $('import-upload-zone').addEventListener('keydown', (event) => { if (event.code === 'Enter' || event.code === 'Space') { event.preventDefault(); $('import-model').click(); } });
+  for (const name of ['dragenter', 'dragover']) $('import-upload-zone').addEventListener(name, (event) => { event.preventDefault(); $('import-upload-zone').classList.add('dragging'); });
+  for (const name of ['dragleave', 'drop']) $('import-upload-zone').addEventListener(name, (event) => { event.preventDefault(); $('import-upload-zone').classList.remove('dragging'); if (name === 'drop') chooseImportFile(event.dataTransfer.files[0]); });
+  $('clear-import-file').addEventListener('click', clearImportFile);
+  document.querySelectorAll('[data-creation-mode]').forEach((button) => button.addEventListener('click', () => setCreationMode(button.dataset.creationMode)));
   document.querySelectorAll('[data-mode]').forEach((button) => button.addEventListener('click', () => chooseMode(button.dataset.mode)));
   document.querySelectorAll('[data-quality]').forEach((button) => button.addEventListener('click', () => chooseQuality(button.dataset.quality)));
   document.querySelectorAll('[data-prompt]').forEach((button) => button.addEventListener('click', () => { $('motion-prompt').value = button.dataset.prompt; $('motion-prompt').focus(); }));
   $('generation-form').addEventListener('submit', submitGeneration);
+  $('import-form').addEventListener('submit', submitImport);
   $('animation-form').addEventListener('submit', submitAnimation);
   $('reset-camera').addEventListener('click', () => state.viewer?.resetCamera());
   $('motions-list').addEventListener('click', (event) => { const button = event.target.closest('[data-motion]'); if (button) { state.selectedMotion = button.dataset.motion; selectJob(state.selectedId, { retainMotion: true }); } });
+  $('motions-list').addEventListener('change', (event) => {
+    const checkbox = event.target.closest('[data-export-motion]');
+    const job = getJob();
+    if (!checkbox || !job) return;
+    const selected = new Set(state.exportSelections.get(job.id) || []);
+    if (checkbox.checked) selected.add(checkbox.dataset.exportMotion); else selected.delete(checkbox.dataset.exportMotion);
+    state.exportSelections.set(job.id, selected);
+    renderMotions(job);
+  });
   $('retry-generation').addEventListener('click', async () => {
     const job = getJob();
     if (!job?.sourceImageUrl) return;

@@ -10,6 +10,7 @@ import unittest
 import uuid
 import secrets
 import copy
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -99,6 +100,12 @@ class StudioHTTPTests(unittest.IsolatedAsyncioTestCase):
         form.add_field("mode", "object")
         return form
 
+    def import_upload(self, model=None, title=''):
+        form = aiohttp.FormData()
+        form.add_field('model', model if model is not None else small_glb(), filename='my-character.glb', content_type='model/gltf-binary')
+        form.add_field('title', title)
+        return form
+
     async def create(self):
         response = await self.client.post("/api/model-studio/jobs", data=self.upload())
         self.assertEqual(response.status, 202, await response.text())
@@ -117,6 +124,53 @@ class StudioHTTPTests(unittest.IsolatedAsyncioTestCase):
         result = await response.json()
         await asyncio.wait_for(self.studio.rig_queue.join(), 10)
         return result
+
+    async def test_profile_owned_glb_import_stays_private_and_exports_selected_completed_motion(self):
+        response = await self.client.post('/api/model-studio/jobs/import', data=self.import_upload())
+        self.assertEqual(response.status, 401, await response.text())
+        credentials = {'username': 'glb_owner', 'password': 'safe test password 123', 'displayName': 'GLB owner'}
+        response = await self.client.post('/api/model-studio/auth/register', json=credentials)
+        self.assertEqual(response.status, 200, await response.text())
+
+        response = await self.client.post('/api/model-studio/jobs/import', data=self.import_upload(title='Мой персонаж'))
+        self.assertEqual(response.status, 201, await response.text())
+        job = await response.json()
+        self.assertEqual(job['title'], 'Мой персонаж')
+        self.assertEqual(job['visibility'], 'private')
+        self.assertEqual(job['status'], 'complete')
+        self.assertEqual(job['stats']['meshes'], 1)
+        self.assertFalse(job['rig']['available'])
+        saved = self.studio.jobs[job['id']]
+        self.assertIn('_accountId', saved)
+        self.assertTrue((server.JOB_ROOT / job['id'] / 'model.glb').is_file())
+        self.assertEqual(FakePipeline.submissions, 0)
+        self.assertEqual([item['id'] for item in (await (await self.client.get('/api/model-studio/jobs')).json())['jobs']], [job['id']])
+
+        motion_id = str(uuid.uuid4())
+        motion_path = server.JOB_ROOT / job['id'] / 'motions' / motion_id / 'animated.glb'
+        motion_path.parent.mkdir(parents=True)
+        motion_path.write_bytes(small_glb(rigged=True))
+        saved['motions'].append({'id': motion_id, 'status': 'complete', 'prompt': 'walk forward', 'frames': 150, 'fps': 30})
+        self.studio.save(saved)
+        endpoint = f'/api/model-studio/jobs/{job["id"]}/export?motion={motion_id}'
+        async with self.outsider.get(self.client.make_url(endpoint)) as response:
+            self.assertEqual(response.status, 404)
+        response = await self.client.get(endpoint)
+        self.assertEqual(response.status, 200)
+        self.assertIn('attachment', response.headers['Content-Disposition'])
+        with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
+            self.assertEqual(set(archive.namelist()), {'model.glb', 'animations/01.glb', 'manifest.json', 'README.txt'})
+            manifest = json.loads(archive.read('manifest.json'))
+        self.assertEqual(manifest['animations'][0]['id'], motion_id)
+        self.assertEqual(manifest['animations'][0]['file'], 'animations/01.glb')
+
+    async def test_import_rejects_invalid_glb_without_creating_a_job(self):
+        credentials = {'username': 'invalid_glb_owner', 'password': 'safe test password 123', 'displayName': 'Invalid GLB owner'}
+        self.assertEqual((await self.client.post('/api/model-studio/auth/register', json=credentials)).status, 200)
+        response = await self.client.post('/api/model-studio/jobs/import', data=self.import_upload(b'not a glb'))
+        self.assertEqual(response.status, 400, await response.text())
+        self.assertEqual(self.studio.jobs, {})
+        self.assertEqual(FakePipeline.submissions, 0)
 
     async def test_delete_completed_job_removes_artifacts_and_never_reappears_after_restart(self):
         job = await self.create()
