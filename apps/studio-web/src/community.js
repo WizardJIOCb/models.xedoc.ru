@@ -196,10 +196,10 @@ function openAuth(mode = 'login') {
 }
 
 const navItems = [
-  ['/', 'Анимация по тексту', 'play', 'Придумай движение'],
+  ['/', 'Галерея', 'grid', 'Работы сообщества'],
   ['/generate-model', '3D по картинке', 'image', 'Создай свою модель'],
+  ['/animation', 'Анимация по тексту', 'play', 'Придумай движение'],
   ['/playground', 'Playground', 'cube', 'Движение и физика'],
-  ['/gallery', 'Галерея', 'grid', 'Работы сообщества'],
   ['/profiles', 'Авторы', 'user', 'Люди и их модели'],
 ];
 const routeActive = (path) => path === '/' ? location.pathname === '/' : location.pathname === path || (path === '/profiles' && location.pathname.startsWith('/profile/'));
@@ -261,7 +261,7 @@ export function mountCommunityHeader() {
   menuDialog.id = 'community-mobile-menu';
   menuDialog.className = 'community-menu-dialog';
   menuDialog.setAttribute('aria-labelledby', 'community-menu-title');
-  menuDialog.innerHTML = `<div class="community-menu-heading"><a href="/generate-model" class="brand">${icon('cube')}<span>models<span class="brand-dot">.</span><span class="brand-domain">xedoc</span></span></a><button class="icon-button" type="button" aria-label="Закрыть меню" data-close-menu>${icon('close')}</button></div><div class="community-menu-body"><div class="eyebrow" id="community-menu-title">СОЗДАВАЙ. СМОТРИ. ДЕЛИСЬ.</div><nav aria-label="Мобильное меню">${navItems.map(([path, label, symbol, subtitle], index) => `<a href="${path}"${routeActive(path) ? ' aria-current="page"' : ''}><span class="community-menu-icon">${icon(symbol)}</span><span><strong>${label}</strong><small>${subtitle}</small></span><span class="community-menu-number">0${index + 1}</span>${icon('arrow')}</a>`).join('')}</nav><div class="community-menu-account"></div><p class="community-menu-footer">Из идеи — в третье измерение.</p></div>`;
+  menuDialog.innerHTML = `<div class="community-menu-heading"><a href="/" class="brand">${icon('cube')}<span>models<span class="brand-dot">.</span><span class="brand-domain">xedoc</span></span></a><button class="icon-button" type="button" aria-label="Закрыть меню" data-close-menu>${icon('close')}</button></div><div class="community-menu-body"><div class="eyebrow" id="community-menu-title">СОЗДАВАЙ. СМОТРИ. ДЕЛИСЬ.</div><nav aria-label="Мобильное меню">${navItems.map(([path, label, symbol, subtitle], index) => `<a href="${path}"${routeActive(path) ? ' aria-current="page"' : ''}><span class="community-menu-icon">${icon(symbol)}</span><span><strong>${label}</strong><small>${subtitle}</small></span><span class="community-menu-number">0${index + 1}</span>${icon('arrow')}</a>`).join('')}</nav><div class="community-menu-account"></div><p class="community-menu-footer">Из идеи — в третье измерение.</p></div>`;
   document.body.append(menuDialog);
   menuButton.addEventListener('click', () => { menuDialog.showModal(); menuButton.setAttribute('aria-expanded', 'true'); });
   menuDialog.querySelector('[data-close-menu]').addEventListener('click', () => menuDialog.close());
@@ -690,7 +690,7 @@ export async function mountCommunityPage() {
   mountCommunityHeader();
   const page = document.getElementById('community-page');
   const path = location.pathname.replace(/\/+$/, '');
-  if (path === '/gallery') return mountCollectionPage(page, 'models');
+  if (!path || path === '/gallery') return mountCollectionPage(page, 'models');
   if (path === '/profiles') return mountCollectionPage(page, 'profiles');
   if (path === '/profile' || path.startsWith('/profile/')) {
     let username;
