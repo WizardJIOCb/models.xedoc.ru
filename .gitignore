@@ -1,0 +1,9 @@
+node_modules
+dist
+.runtime
+data/jobs
+data/store.json
+.env
+*.log
+*.tsbuildinfo
+.DS_Store
